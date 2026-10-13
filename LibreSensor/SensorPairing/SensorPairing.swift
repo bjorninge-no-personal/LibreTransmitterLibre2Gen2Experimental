@@ -16,9 +16,13 @@ public class SensorPairingInfo: ObservableObject, Codable {
 
     @Published public var sensorName : String? = nil
     @Published public var macAddress : String? = nil
-    
+
+    // Gen2-only NFC credentials; nil for generation 1. See `Sensor`.
+    @Published public var keyIndex : Int? = nil
+    @Published public var streamingAuthData : Data? = nil
+
     enum CodingKeys: CodingKey {
-        case uuid, patchInfo, fram, streamingEnabled, sensorName, macAddress
+        case uuid, patchInfo, fram, streamingEnabled, sensorName, macAddress, keyIndex, streamingAuthData
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -29,29 +33,33 @@ public class SensorPairingInfo: ObservableObject, Codable {
         try container.encode(streamingEnabled, forKey: .streamingEnabled)
         try container.encode(sensorName, forKey: .sensorName)
         try container.encode(macAddress, forKey: .macAddress)
-
-       
+        try container.encodeIfPresent(keyIndex, forKey: .keyIndex)
+        try container.encodeIfPresent(streamingAuthData, forKey: .streamingAuthData)
     }
     public required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         uuid = try container.decode(Data.self, forKey: .uuid)
         patchInfo = try container.decode(Data.self, forKey: .patchInfo)
-        
+
         fram = try container.decode(Data.self, forKey: .fram)
         streamingEnabled = try container.decode(Bool.self, forKey: .streamingEnabled)
         sensorName = try container.decode(String?.self, forKey: .sensorName)
         macAddress = try container.decode(String?.self, forKey: .macAddress)
+        keyIndex = try container.decodeIfPresent(Int.self, forKey: .keyIndex)
+        streamingAuthData = try container.decodeIfPresent(Data.self, forKey: .streamingAuthData)
     }
-    
 
-    public init(uuid: Data=Data(), patchInfo: Data=Data(), fram: Data=Data(), streamingEnabled: Bool = false, sensorName: String? = nil, macAddress: String? = nil ) {
+
+    public init(uuid: Data=Data(), patchInfo: Data=Data(), fram: Data=Data(), streamingEnabled: Bool = false, sensorName: String? = nil, macAddress: String? = nil, keyIndex: Int? = nil, streamingAuthData: Data? = nil ) {
         self.uuid = uuid
         self.patchInfo = patchInfo
         self.fram = fram
         self.streamingEnabled = streamingEnabled
         self.sensorName = sensorName
         self.macAddress = macAddress
+        self.keyIndex = keyIndex
+        self.streamingAuthData = streamingAuthData
     }
 
     public var sensorData: SensorData? {

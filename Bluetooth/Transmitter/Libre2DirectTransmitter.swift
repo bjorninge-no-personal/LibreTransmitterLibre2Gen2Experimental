@@ -45,6 +45,28 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     private var sensorData: SensorData?
     private var metadata: LibreTransmitterMetadata?
 
+    // MARK: Gen2 routing
+    //
+    // Gen2 sensors share this class (same service/characteristics/name). When
+    // the paired sensor is gen2-ready, messages are driven through a session
+    // handler instead of the stateless gen1 unlock-then-decrypt path.
+    //
+    // Routing follows what the sensor is, not whether the handler could be
+    // built: a gen2 sensor without credentials or keys must never fall back to
+    // the gen1 unlock, it simply cannot stream.
+    private lazy var isGen2: Bool = UserDefaults.standard.preSelectedSensor?.securityGeneration == 2
+
+    private lazy var gen2Handler: Libre2Gen2DirectHandler? = {
+        guard self.isGen2, let sensor = UserDefaults.standard.preSelectedSensor else {
+            return nil
+        }
+        let handler = Libre2Gen2DirectHandler(sensor: sensor, keyStore: Libre2Gen2RuntimeKeyStore.shared)
+        if handler == nil {
+            self.logger.debug("gen2 sensor paired but handler unavailable (missing NFC credentials or keys)")
+        }
+        return handler
+    }()
+
     class func canSupportPeripheral(_ peripheral: PeripheralProtocol) -> Bool {
         // name can be one of the following formats:
         // <description>: example
@@ -83,10 +105,15 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     }
 
     func updateValueForNotifyCharacteristics(_ value: Data, peripheral: CBPeripheral, writeCharacteristic: CBCharacteristic?) {
+        if isGen2 {
+            updateValueForGen2(value, peripheral: peripheral, writeCharacteristic: writeCharacteristic)
+            return
+        }
+
         rxBuffer.append(value)
 
         logger.debug("libre2 direct Appended value with length  \(String(describing: value.count)), buffer length is: \(String(describing: self.rxBuffer.count))")
-        
+
         delegate?.libreDeviceLogMessage(payload: "libre2direct received value: \(value.toDebugString())", type: .receive)
 
         if rxBuffer.count == expectedBufferSize {
@@ -96,6 +123,24 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     }
 
     func didDiscoverWriteCharacteristics(_ peripheral: CBPeripheral, writeCharacteristics: CBCharacteristic) {
+
+        if isGen2 {
+            // Gen2 uses a challenge/response handshake, not the gen1 streaming
+            // unlock. Per DiaBLE's Abbott gen2 BLE path, the exchange is kicked
+            // off by writing the "read security challenge" opcode (0x20); the
+            // sensor then notifies its 14-byte challenge, which updateValueForGen2
+            // answers with the session-info command.
+            //
+            // GEN2-TRANSPORT-TODO: DiaBLE also enables notifications on the
+            // *write* characteristic for gen2, not only the notify one. Confirm
+            // on a real sensor which characteristic carries the challenge;
+            // LibreTransmitter currently notifies on the notify characteristic.
+            let kickoff = Data([Libre2Gen2.cmdReadChallenge])
+            logger.debug("gen2: writing read-security-challenge kickoff: \(kickoff.hexEncodedString())")
+            delegate?.libreDeviceLogMessage(payload: "gen2 kickoff (read security challenge): \(kickoff.hexEncodedString())", type: .send)
+            peripheral.writeValue(kickoff, for: writeCharacteristics, type: .withResponse)
+            return
+        }
 
         guard let unlock = unlock() else {
             logger.debug("Cannot unlock sensor, aborting")
@@ -152,14 +197,28 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
 
         do {
             let decryptedBLE = Data(try Libre2.decryptBLE(id: [UInt8](sensor.uuid), data: [UInt8](rxBuffer)))
+            emit(decryptedBLE: decryptedBLE, sensor: sensor)
+        } catch {
+
+        }
+
+        reset()
+
+    }
+
+    /// Shared tail for both generations: parse a 44-byte decrypted BLE payload,
+    /// verify its CRC, build metadata, merge buffered trends, and notify the
+    /// delegate. Gen1 reaches here after `Libre2.decryptBLE`; gen2 after the
+    /// session handler has already decrypted and CRC-checked the packet.
+    private func emit(decryptedBLE: Data, sensor: Sensor) {
             var sensorUpdate = Libre2.parseBLEData(decryptedBLE)
- 
+
 
             guard sensorUpdate.crcVerified else {
                 delegate?.libreSensorDidUpdate(with: .checksumValidationError)
                 return
             }
-            
+
 
             metadata = LibreTransmitterMetadata(hardware: nil, firmware: nil, battery: 100,
                                                 name: Self.shortTransmitterName,
@@ -215,13 +274,50 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
             delegate?.libreSensorDidUpdate(with: sensorUpdate, and: metadata!)
 
             print("libre2 got sensorupdate: \(String(describing: sensorUpdate))")
+    }
 
-        } catch {
+    // MARK: - Gen2 message handling
 
+    /// GEN2-TRANSPORT-TODO: reassembly is by accumulating notifications until a
+    /// recognised complete length is reached (14 challenge / 25 session info /
+    /// 46 reading). This is a placeholder for the real on-wire framing, which
+    /// must be confirmed against a sensor; a length-collision or a partial read
+    /// would desync this buffer.
+    private func updateValueForGen2(_ value: Data, peripheral: CBPeripheral, writeCharacteristic: CBCharacteristic?) {
+        rxBuffer.append(value)
+        delegate?.libreDeviceLogMessage(payload: "gen2 received value: \(value.toDebugString())", type: .receive)
+
+        let recognised: Set<Int> = [Libre2Gen2.challengeLength,
+                                    Libre2Gen2.sessionInfoLength,
+                                    Libre2Gen2.packetLength]
+        guard recognised.contains(rxBuffer.count) else {
+            return
         }
 
-        reset()
+        let message = [UInt8](rxBuffer)
+        rxBuffer.resetAllBytes()
 
+        guard let handler = gen2Handler else { return }
+        switch handler.ingest(message) {
+        case .write(let bytes):
+            guard let writeCharacteristic else {
+                logger.debug("gen2: no write characteristic to send command")
+                return
+            }
+            delegate?.libreDeviceLogMessage(payload: "gen2 writing command: \(Data(bytes).hexEncodedString())", type: .send)
+            peripheral.writeValue(Data(bytes), for: writeCharacteristic, type: .withResponse)
+
+        case .payload(let payload):
+            guard let sensor = UserDefaults.standard.preSelectedSensor else { return }
+            emit(decryptedBLE: Data(payload), sensor: sensor)
+
+        case .none:
+            break
+
+        case .failure:
+            delegate?.libreSensorDidUpdate(with: .checksumValidationError)
+            reset()
+        }
     }
 
 }

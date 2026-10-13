@@ -16,6 +16,7 @@ public enum PairingError: Error {
     case decryptionError
     case noPatchInfo
     case nfcNotSupported
+    case gen2CredentialsUnavailable
 }
 
 extension PairingError: LocalizedError {
@@ -33,6 +34,8 @@ extension PairingError: LocalizedError {
             return LocalizedString("Could not get patch info", comment: "error description for PairingError.noPatchInfo")
         case .nfcNotSupported:
             return LocalizedString("Phone NFC not supported!", comment: "error description for PairingError.nfcNotSupported")
+        case .gen2CredentialsUnavailable:
+            return LocalizedString("Could not read streaming credentials from this sensor", comment: "error description for PairingError.gen2CredentialsUnavailable")
         }
     }
 
@@ -40,6 +43,8 @@ extension PairingError: LocalizedError {
         switch self {
         case .nfcNotSupported:
             return LocalizedString("Your phone or app is not enabled for NFC communications, which is needed to pair to libre2 sensors", comment: "Recovery suggestion for PairingError.nfcNotSupported")
+        case .gen2CredentialsUnavailable:
+            return LocalizedString("This sensor uses a newer security generation that is not fully supported yet", comment: "Recovery suggestion for PairingError.gen2CredentialsUnavailable")
         default:
             return nil
         }
@@ -81,13 +86,13 @@ public class SensorPairingService: NSObject, NFCTagReaderSessionDelegate, Sensor
         errorSubject.eraseToAnyPublisher()
     }
     
-    private func sendError(_ error: Error) {
+    func sendError(_ error: Error) {
         DispatchQueue.main.async { [weak self] in
             self?.errorSubject.send(error)
         }
     }
 
-    private func sendUpdate(_ info: SensorPairingInfo) {
+    func sendUpdate(_ info: SensorPairingInfo) {
         DispatchQueue.main.async { [weak self] in
             self?.readingsSubject.send(info)
         }
@@ -129,6 +134,15 @@ public class SensorPairingService: NSObject, NFCTagReaderSessionDelegate, Sensor
                     return
                 case .success:
                     tag.customCommand(requestFlags: .highDataRate, customCommandCode: 0xA1, customRequestParameters: Data()) { response, error in
+
+                        // Gen2 sensors do not answer the standard block read used below,
+                        // so they take their own path from here (SensorPairingService+Gen2).
+                        if (try? Libre2Gen2.securityGeneration(patchInfo: [UInt8](response))) == 2 {
+                            self.pairGen2(session: session, tag: tag,
+                                          sensorUID: Data(tag.identifier.reversed()),
+                                          patchInfo: response)
+                            return
+                        }
 
                         for i in 0 ..< requests {
                             tag.readMultipleBlocks(
@@ -189,7 +203,7 @@ public class SensorPairingService: NSObject, NFCTagReaderSessionDelegate, Sensor
                                             self.sendError(PairingError.noSensorData)
                                             return
                                         }
-                                        
+
                                         guard sensorType == .libre2  else {
                                             session.invalidate(errorMessage: PairingError.wrongSensorType.localizedDescription)
                                             self.sendError(PairingError.noSensorData)
@@ -333,6 +347,13 @@ public class SensorPairingService: NSObject, NFCTagReaderSessionDelegate, Sensor
                 }
             }
         }
+    }
+
+    /// The enable-streaming (0x1e) request as built for gen1, for the gen2 pairing
+    /// path, which has no gen2-specific construction for it yet.
+    func enableStreamingRequest(patchInfo: Data, sensorUID: Data) -> (code: Int, parameters: Data) {
+        let cmd = nfcCommand(.enableStreaming, unlockCode: unlockCode, patchInfo: patchInfo, sensorUID: sensorUID)
+        return (Int(cmd.code), cmd.parameters)
     }
 
     private func nfcCommand(_ code: Subcommand, unlockCode: UInt32, patchInfo: Data, sensorUID: Data) -> NFCCommand {
