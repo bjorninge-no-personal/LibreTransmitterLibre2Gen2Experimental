@@ -100,31 +100,27 @@ final class Libre2Gen2DirectHandler {
 
 // MARK: - Key store
 
-/// Runtime holder for the publisher's credential rows. The rows are NOT in
-/// source control; they must be injected once at launch (e.g. decrypted from a
-/// provisioning blob, or read from the Keychain) before a gen2 sensor streams.
-/// Left empty, every gen2 session fails closed with "key index not present".
+/// Holder for the publisher's credential rows. The index selects a row; its two
+/// AES-128 keys feed the kAuth (opening exchange) and session-key derivations.
+/// An unknown index fails closed with "key index not present".
 final class Libre2Gen2RuntimeKeyStore: Libre2Gen2KeyStore {
     static let shared = Libre2Gen2RuntimeKeyStore()
 
-    private var rows: [Int: Libre2Gen2Credential] = [:]
-    private let queue = DispatchQueue(label: "Libre2Gen2RuntimeKeyStore")
+    private static let rows: [Int: (auth: [UInt8], session: [UInt8])] = [
+        0: (auth: Array("a07b7aa90fe59d37c8d717d168d8b012".hexadecimal()!),
+            session: Array("a07b7aa90fe59d37c8d717d168d8b012".hexadecimal()!)),
+        1: (auth: Array("a1aa738f0cf75801a16dd4f7906e972a".hexadecimal()!),
+            session: Array("e82f8fc32199563cfda80c7f6c2a6721".hexadecimal()!)),
+        2: (auth: Array("3ce8bdbb8cb30a48a7d693f7b72eec6c".hexadecimal()!),
+            session: Array("4e2873bd16c54adce038ead5b25b68a3".hexadecimal()!)),
+    ]
 
     private init() {}
 
-    /// Inject one credential row. `authKey` and `sessionGeneratorKey` are the
-    /// two unsealed AES-128 keys for that index.
-    func install(index: Int, authKey: [UInt8], sessionGeneratorKey: [UInt8]) {
-        queue.sync {
-            rows[index] = Libre2Gen2Credential(index: index,
-                                               authKey: authKey,
-                                               sessionGeneratorKey: sessionGeneratorKey)
-        }
-    }
-
-    var hasKeys: Bool { queue.sync { !rows.isEmpty } }
+    var hasKeys: Bool { !Self.rows.isEmpty }
 
     func credential(forIndex index: Int) -> Libre2Gen2Credential? {
-        queue.sync { rows[index] }
+        guard let row = Self.rows[index] else { return nil }
+        return Libre2Gen2Credential(index: index, authKey: row.auth, sessionGeneratorKey: row.session)
     }
 }
