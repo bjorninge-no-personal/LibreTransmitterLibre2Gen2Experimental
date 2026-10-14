@@ -126,17 +126,22 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
 
         if isGen2 {
             // Gen2 uses a challenge/response handshake, not the gen1 streaming
-            // unlock. Per DiaBLE's Abbott gen2 BLE path, the exchange is kicked
-            // off by writing the "read security challenge" opcode (0x20); the
-            // sensor then notifies its 14-byte challenge, which updateValueForGen2
-            // answers with the session-info command.
+            // unlock. Per DiaBLE's and Juggluco's Abbott gen2 BLE path, the
+            // exchange is kicked off by writing the "read security challenge"
+            // opcode (0x20); the sensor then notifies its 14-byte challenge on the
+            // *write* characteristic (F001), which updateValueForGen2 answers with
+            // the session-info command. Glucose packets later arrive on the notify
+            // characteristic (F002).
             //
-            // GEN2-TRANSPORT-TODO: DiaBLE also enables notifications on the
-            // *write* characteristic for gen2, not only the notify one. Confirm
-            // on a real sensor which characteristic carries the challenge;
-            // LibreTransmitter currently notifies on the notify characteristic.
+            // Both DiaBLE and Juggluco enable notifications on the write
+            // characteristic for gen2 (the handshake rides on it), so do that here
+            // before the kickoff. CoreBluetooth serialises GATT operations per
+            // peripheral, so the CCCD (enable-notify) write completes before the
+            // kickoff write is delivered. (Cross-referenced against both projects;
+            // exact on-wire timing still warrants verification on a real sensor.)
+            peripheral.setNotifyValue(true, for: writeCharacteristics)
             let kickoff = Data([Libre2Gen2.cmdReadChallenge])
-            logger.debug("gen2: writing read-security-challenge kickoff: \(kickoff.hexEncodedString())")
+            logger.debug("gen2: enabled notify on write characteristic; writing read-security-challenge kickoff: \(kickoff.hexEncodedString())")
             delegate?.libreDeviceLogMessage(payload: "gen2 kickoff (read security challenge): \(kickoff.hexEncodedString())", type: .send)
             peripheral.writeValue(kickoff, for: writeCharacteristics, type: .withResponse)
             return

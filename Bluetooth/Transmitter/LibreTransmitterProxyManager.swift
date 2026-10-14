@@ -721,7 +721,14 @@ public final class LibreTransmitterProxyManager: NSObject, CBCentralManagerDeleg
         if let error {
             logger.error("Characteristic update error: \(error.localizedDescription)")
         } else {
-            if characteristic.uuid == notifyCharacteristicUUID, let value = characteristic.value {
+            // gen2 Libre 2 sensors deliver the challenge/session-info handshake on
+            // the *write* characteristic (F001) and the 46-byte glucose packets on
+            // the notify characteristic (F002); gen1 only ever notifies on F002
+            // (its write characteristic has no notifications enabled, so it never
+            // produces values here). The gen2 handler demultiplexes by message
+            // length, so values from both characteristics route to the same place.
+            if let value = characteristic.value,
+               characteristic.uuid == notifyCharacteristicUUID || characteristic.uuid == writeCharachteristicUUID {
                 if self.activePlugin == nil {
                     logger.error("Characteristic update error: activeplugin was nil")
                 }
