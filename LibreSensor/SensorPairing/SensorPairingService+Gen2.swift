@@ -20,10 +20,12 @@
 //      8 0xA5 filler bytes. DiaBLE also names a GEN2_CMD_DECRYPT_NFC_STREAM
 //      operation, so this FRAM is probably encrypted; its decryption is not in
 //      the reference. If so, the CRC check below rejects it.
-//    - enable streaming: DiaBLE builds the gen2 0x1e request as an
-//      *authenticated* NFC command, and derives streamingAuthData from the
-//      *verified* response (10 bytes on older US sensors, 12 on newer ones).
-//      Neither step is in the reference; the gen1 request is sent instead.
+//    - enable streaming: DiaBLE and Juggluco both build the gen2 0x1e request as
+//      an *authenticated* NFC command and derive streamingAuthData from the
+//      *verified* response. That authenticated request is still not in the
+//      reference, so the gen1 request is sent instead (likely wrong). The reply
+//      *length* is now handled: 10 bytes on older US2 sensors, 12 on newer ones
+//      (the extra 2 bytes carry the key index; see pairGen2).
 //
 
 import Foundation
@@ -86,17 +88,34 @@ extension SensorPairingService {
                     }
                     logger.debug("gen2: 0x1e response (\(response.count) bytes): \(response.hexEncodedString())")
 
-                    guard response.count == Libre2Gen2.streamingAuthLength else {
+                    // The enable-streaming reply is the 10-byte auth blob, but
+                    // newer gen2 sensors append a 2-byte little-endian key index
+                    // (10 + 2 = 12 bytes). Cross-referenced with Juggluco's
+                    // Gen2.lastenaable / authenticateStream: for the 12-byte form
+                    // the key index is auth[10..11] and the crypto uses only the
+                    // first 10 bytes; for the 10-byte (older US2) form the key
+                    // index is the one read over NFC (A1 22). DiaBLE documents the
+                    // same 10-vs-12 split.
+                    let bytes = [UInt8](response)
+                    let effectiveKeyIndex: Int
+                    switch bytes.count {
+                    case Libre2Gen2.streamingAuthLength:        // 10: older US2 sensor
+                        effectiveKeyIndex = keyIndex
+                    case Libre2Gen2.streamingAuthLength + 2:    // 12: newer sensor
+                        effectiveKeyIndex = Int(bytes[10]) | (Int(bytes[11]) << 8)
+                    default:
+                        logger.error("gen2: unexpected enable-streaming reply length \(bytes.count)")
                         fail(.gen2CredentialsUnavailable)
                         return
                     }
+                    let streamingAuthData = Data(bytes.prefix(Libre2Gen2.streamingAuthLength))
 
                     // gen1 takes the MAC address from the 0x1e response; for gen2
                     // that response is the auth blob, so the MAC is unknown here
                     // and peripheral matching falls back to the advertised name.
                     self.sendUpdate(SensorPairingInfo(uuid: sensorUID, patchInfo: patchInfo, fram: fram,
                                                       streamingEnabled: true, macAddress: nil,
-                                                      keyIndex: keyIndex, streamingAuthData: response))
+                                                      keyIndex: effectiveKeyIndex, streamingAuthData: streamingAuthData))
                     session.invalidate()
                 }
             }
