@@ -168,11 +168,16 @@ extension Libre2Gen2 {
 
     /// Abbott's CRC16: reflected table 0x8408, init 0xffff, and the sixteen
     /// bits of the result READ BACKWARDS. No final xor, and (unlike
-    /// `Crc.crc16`) no byte swap.
+    /// `Crc.crc16`) no byte swap. An odd-length input is padded with one zero
+    /// byte (Juggluco's l2g2_crc16). That matters for the 23-byte NFC
+    /// challenge and replies; the 42-byte BLE payload is even and unaffected.
     static func crc16(_ data: ArraySlice<UInt8>) -> UInt16 {
         var crc: UInt16 = 0xFFFF
         for b in data {
             crc = crcTable[Int((crc ^ UInt16(b)) & 0xFF)] ^ (crc >> 8)
+        }
+        if data.count % 2 == 1 {
+            crc = crcTable[Int(crc & 0xFF)] ^ (crc >> 8)
         }
         var reversed: UInt16 = 0
         var tmp = crc
