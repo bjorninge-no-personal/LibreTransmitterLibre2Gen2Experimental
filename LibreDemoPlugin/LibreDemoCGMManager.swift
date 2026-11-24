@@ -12,7 +12,6 @@ import LibreTransmitter
 import LibreTransmitterUI
 import LoopKit
 import LoopKitUI
-import LoopAlgorithm
 import os.log
 import LoopTestingKit
 
@@ -90,8 +89,8 @@ class LibreDemoCGMManager: LibreTransmitterManagerV3 {
 
         self.setObservables(sensorData: sensorData, bleData: nil, metaData: nil)
 
-        self.delegateQueue.async {
-            self.cgmManagerDelegate?.cgmManager(self, hasNew: CGMReadingResult.newData([newSample]))
+        self.delegate.notify { delegate in
+            await delegate?.cgmManager(self, hasNew: CGMReadingResult.newData([newSample]))
         }
     }
 }

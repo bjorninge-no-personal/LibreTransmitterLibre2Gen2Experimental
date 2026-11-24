@@ -168,11 +168,16 @@ extension Libre2Gen2 {
 
     /// Abbott's CRC16: reflected table 0x8408, init 0xffff, and the sixteen
     /// bits of the result READ BACKWARDS. No final xor, and (unlike
-    /// `Crc.crc16`) no byte swap.
+    /// `Crc.crc16`) no byte swap. An odd-length input is padded with one zero
+    /// byte (Juggluco's l2g2_crc16). That matters for the 23-byte NFC
+    /// challenge and replies; the 42-byte BLE payload is even and unaffected.
     static func crc16(_ data: ArraySlice<UInt8>) -> UInt16 {
         var crc: UInt16 = 0xFFFF
         for b in data {
             crc = crcTable[Int((crc ^ UInt16(b)) & 0xFF)] ^ (crc >> 8)
+        }
+        if data.count % 2 == 1 {
+            crc = crcTable[Int(crc & 0xFF)] ^ (crc >> 8)
         }
         var reversed: UInt16 = 0
         var tmp = crc
@@ -554,4 +559,129 @@ private func le(_ value: UInt32) -> [UInt8] {
      UInt8((value >> 8) & 0xFF),
      UInt8((value >> 16) & 0xFF),
      UInt8((value >> 24) & 0xFF)]
+}
+
+// MARK: - NFC exchange
+//
+// The authenticated NFC side, as Juggluco runs it (Gen2.java over protocol.c:
+// prepareNfcCommand, readAuthenticatedFram, enableStreaming). Every command is
+// ISO 15693 custom command 0xA1; the layouts are as CoreNFC returns them,
+// without the response-flags byte Juggluco's raw frames start with:
+//
+//   A1 22          root slot: x x slot(LE2)                      (Juggluco raw[3..4])
+//   A1 20          challenge(25): sensorRandom(7) counter(LE4) 3 salt(3) streamPrefix(4) epoch(2) CRC(2)
+//   A1 cmd ‖ 15    authenticated command: Speck-CTR(kAuth, nonce step 0,
+//                  hostRandom(7) ‖ ~cmd ‖ sensorRandom(7))
+//     1F           FRAM read auth -> header(8) ‖ CTR(step 1, hostRandom ‖ context16) ‖ CRC
+//     1E           enable streaming -> header(8) ‖ CTR(step 1, sensorRandom ‖ payload9 ‖ hostRandom) ‖ CRC
+//                  payload9 = BLE address(6) ‖ the last 3 bytes of streamingAuthData
+//   A1 21 b n-1    n blocks from b: header(8) ‖ n × 8, each XORed with
+//                  Speck(dataKey, 00 b streamPrefix(top bit of byte 5 clear) epoch)
+//
+// streamingAuthData (the BLE provisioning) = streamPrefix ‖ salt ‖ payload9[6..<9].
+
+extension Libre2Gen2 {
+    static let cmdEnableStreaming: UInt8 = 0x1E
+    static let cmdAuthenticateFRAMRead: UInt8 = 0x1F
+    static let cmdReadBlocks: UInt8 = 0x21
+    static let cmdReadRootSlot: UInt8 = 0x22
+    static let nfcChallengeLength = 25
+    static let nfcReplyHeaderLength = 8
+    static let nfcAuthReplyLength = 8 + 23 + 2
+
+    /// The CRC of data[0..<count], stored little-endian behind it.
+    static func hasCRC(_ data: [UInt8], payloadCount count: Int) -> Bool {
+        guard data.count >= count + 2 else { return false }
+        return crc16(data[0..<count]) == (UInt16(data[count]) | (UInt16(data[count + 1]) << 8))
+    }
+
+    /// The NFC auth nonce: as `authNonce`, but with the transport bit clear.
+    static func nfcAuthNonce(salt: [UInt8], counter: UInt32) -> [UInt8] {
+        [0, salt[0], salt[1], salt[2] & 0x7F] + le(counter)
+    }
+}
+
+/// One authenticated NFC exchange: a challenge and the command that answers it.
+final class Libre2Gen2NFCExchange {
+    let credential: Libre2Gen2Credential
+    let kauth: [UInt8]
+
+    private(set) var sensorRandom: [UInt8] = []
+    private(set) var counter: UInt32 = 0
+    private(set) var salt: [UInt8] = []
+    private(set) var streamPrefix: [UInt8] = []
+    private(set) var epoch: [UInt8] = []
+    private var hostRandom: [UInt8] = []
+
+    init(uid: [UInt8], credential: Libre2Gen2Credential) throws {
+        self.credential = credential
+        self.kauth = try credential.kauth(uid: uid)
+    }
+
+    /// The A1 parameters (command ‖ 15 bytes) answering a 25-byte challenge.
+    func request(challenge: [UInt8], command: UInt8, random overrideRandom: [UInt8]? = nil) throws -> [UInt8] {
+        guard challenge.count == Libre2Gen2.nfcChallengeLength,
+              Libre2Gen2.hasCRC(challenge, payloadCount: 23) else {
+            throw Libre2Gen2.Libre2Gen2Error("NFC challenge of \(challenge.count) bytes, or its CRC, is wrong")
+        }
+        sensorRandom = Array(challenge[0..<7])
+        counter = u32le(challenge, 7)
+        salt = Array(challenge[14..<17])
+        streamPrefix = Array(challenge[17..<21])
+        epoch = Array(challenge[21..<23])
+        hostRandom = overrideRandom ?? Libre2Gen2.randomBytes(Libre2Gen2.randomLength)
+        let plaintext = hostRandom + [~command] + sensorRandom
+        let nonce = Libre2Gen2.nfcAuthNonce(salt: salt, counter: counter)
+        return [command] + (try Libre2Gen2.speckCTR(key: kauth, iv: nonce, data: plaintext))
+    }
+
+    private func openReply(_ reply: [UInt8], encryptedCount: Int) throws -> [UInt8] {
+        let h = Libre2Gen2.nfcReplyHeaderLength
+        guard reply.count == h + encryptedCount + 2,
+              Libre2Gen2.hasCRC(Array(reply[h...]), payloadCount: encryptedCount) else {
+            throw Libre2Gen2.Libre2Gen2Error("NFC reply of \(reply.count) bytes, or its CRC, is wrong")
+        }
+        let nonce = Libre2Gen2.nfcAuthNonce(salt: salt, counter: counter &+ 1)
+        return try Libre2Gen2.speckCTR(key: kauth, iv: nonce, data: Array(reply[h..<(h + encryptedCount)]))
+    }
+
+    /// The data key from the reply to an authenticated FRAM read (0x1F).
+    func dataKey(reply: [UInt8]) throws -> [UInt8] {
+        let plaintext = try openReply(reply, encryptedCount: 23)
+        guard Array(plaintext[0..<7]) == hostRandom else {
+            throw Libre2Gen2.Libre2Gen2Error("the sensor did not echo our random bytes: kAuth differs, so the root slot is wrong")
+        }
+        return try credential.sessionKey(context: Array(plaintext[7..<23]))
+    }
+
+    /// The payload of an authenticated command's reply, both randoms checked.
+    func commandReply(_ reply: [UInt8], payloadCount: Int) throws -> [UInt8] {
+        let r = Libre2Gen2.randomLength
+        let plaintext = try openReply(reply, encryptedCount: payloadCount + 2 * r)
+        guard Array(plaintext[0..<r]) == sensorRandom,
+              Array(plaintext[(r + payloadCount)...]) == hostRandom else {
+            throw Libre2Gen2.Libre2Gen2Error("the command reply's random echoes do not match")
+        }
+        return Array(plaintext[r..<(r + payloadCount)])
+    }
+
+    /// Decrypt FRAM blocks read with A1 21 under the data key.
+    func decryptBlocks(dataKey: [UInt8], firstBlock: Int, encrypted: [UInt8]) throws -> [UInt8] {
+        var out = [UInt8]()
+        for i in 0..<(encrypted.count / 8) {
+            var nonce = [UInt8](repeating: 0, count: 8)
+            nonce[1] = UInt8((firstBlock + i) & 0xFF)
+            nonce[2..<6] = streamPrefix[0..<4]
+            nonce[5] &= 0x7F
+            nonce[6..<8] = epoch[0..<2]
+            // one block per nonce: the counter byte is the block number's own
+            out += try Libre2Gen2.speckCTR(key: dataKey, iv: nonce, data: Array(encrypted[(i * 8)..<(i * 8 + 8)]))
+        }
+        return out
+    }
+
+    /// streamingAuthData: streamPrefix ‖ salt ‖ the reply's last 3 bytes.
+    func streamingAuthData(enableStreamingPayload payload: [UInt8]) -> [UInt8] {
+        streamPrefix + salt + Array(payload[6..<9])
+    }
 }
