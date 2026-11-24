@@ -5,7 +5,6 @@
 //
 
 import Foundation
-import LoopAlgorithm
 import LoopKit
 import LoopKitUI
 import UIKit
@@ -81,15 +80,18 @@ open class LibreTransmitterManagerV3: CGMManager, LibreTransmitterDelegate {
         }
         set {
             delegate.delegate = newValue
+            refreshDelegateStartDate()
         }
     }
 
-    public var delegateQueue: DispatchQueue! {
-        get {
-            return delegate.queue
-        }
-        set {
-            delegate.queue = newValue
+    /// The delegate's filter date, for readings processed before `latestBackfill` is set (after a relaunch).
+    /// Readings are processed synchronously, so the delegate is asked ahead of time.
+    private let delegateStartDate = Locked<Date?>(nil)
+
+    private func refreshDelegateStartDate() {
+        Task {
+            let startDate = await delegate.call { await $0?.startDateToFilterNewData(for: self) }
+            delegateStartDate.value = startDate
         }
     }
 
@@ -134,8 +136,8 @@ open class LibreTransmitterManagerV3: CGMManager, LibreTransmitterDelegate {
                         warmupPeriod: .hours(1)
                         )
         
-        self.delegateQueue.async {
-            self.cgmManagerDelegate?.cgmManager(self, hasNew: [event])
+        delegate.notify { delegate in
+            await delegate?.cgmManager(self, hasNew: [event])
         }
         
         
@@ -293,7 +295,11 @@ open class LibreTransmitterManagerV3: CGMManager, LibreTransmitterDelegate {
     internal var countTimesWithoutData: Int = 0
 
     open var pairingService: SensorPairingProtocol {
+        #if targetEnvironment(simulator)
+        return SimulatedSensorPairingService()
+        #else
         return SensorPairingService()
+        #endif
     }
 
     open var bluetoothSearcher: BluetoothSearcher {
@@ -465,14 +471,14 @@ extension LibreTransmitterManagerV3 {
         // but that might not be available when loop is restarted for example
         //
         if startDate == nil {
-            startDate = self.delegate.call { $0?.startDateToFilterNewData(for: self) }
+            startDate = delegateStartDate.value
         }
 
         // add one second to startdate to make this an exclusive (non overlapping) match
         return startDate?.addingTimeInterval(1)
     }
 
-    func glucosesToSamplesFilter(_ array: [LibreGlucose], startDate: Date?, calculateTrends: Bool = true) -> [NewGlucoseSample] {
+    func glucosesToSamplesFilter(_ array: [LibreGlucose], startDate: Date?, calculateTrends: Bool = true, isBackfill: Bool = false) -> [NewGlucoseSample] {
         let glucoses = array
             .filter { $0.isStateValid }
             .sorted { $0.startDate > $1.startDate }
@@ -506,7 +512,8 @@ extension LibreTransmitterManagerV3 {
                     isDisplayOnly: false,
                     wasUserEntered: false,
                     syncIdentifier: $0.syncId,
-                    device: self.proxy?.device)
+                    device: self.proxy?.device,
+                    isBackfill: isBackfill)
             }
     }
 
