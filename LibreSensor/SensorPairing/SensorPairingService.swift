@@ -349,13 +349,6 @@ public class SensorPairingService: NSObject, NFCTagReaderSessionDelegate, Sensor
         }
     }
 
-    /// The enable-streaming (0x1e) request as built for gen1, for the gen2 pairing
-    /// path, which has no gen2-specific construction for it yet.
-    func enableStreamingRequest(patchInfo: Data, sensorUID: Data) -> (code: Int, parameters: Data) {
-        let cmd = nfcCommand(.enableStreaming, unlockCode: unlockCode, patchInfo: patchInfo, sensorUID: sensorUID)
-        return (Int(cmd.code), cmd.parameters)
-    }
-
     fileprivate func nfcCommand(_ code: Subcommand, unlockCode: UInt32, patchInfo: Data, sensorUID: Data) -> NFCCommand {
         var b: [UInt8] = []
         var y: UInt16

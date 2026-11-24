@@ -58,6 +58,17 @@ public final class SimulatedSensorPairingService: SensorPairingProtocol {
         _ = try await nfc(["op": "systemInfo"])
         let patchInfo = try await nfc(["op": "custom", "code": 0xA1, "parameters": ""])
 
+        // A gen2 sensor takes its own path from here, as in SensorPairingService:
+        // the same Libre2Gen2Pairing.pair, with libre2sim's /nfc as the tag.
+        if (try? Libre2Gen2.securityGeneration(patchInfo: [UInt8](patchInfo))) == 2 {
+            guard sensorUID.count == 8 && patchInfo.count == 6 else { throw PairingError.noSensorData }
+            guard SensorType(patchInfo: patchInfo) == .libre2 else { throw PairingError.wrongSensorType }
+            let result = try await Libre2Gen2Pairing.pair(uid: [UInt8](sensorUID)) { parameters in
+                try await self.nfc(["op": "custom", "code": 0xA1, "parameters": parameters.hexEncodedString()])
+            }
+            return result.pairingInfo(sensorUID: sensorUID, patchInfo: patchInfo)
+        }
+
         let blocks = 43
         let requestBlocks = 3
         var fram = Data()
