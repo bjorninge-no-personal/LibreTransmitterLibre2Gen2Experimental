@@ -13,13 +13,21 @@
 //    - message shapes: 14-byte challenge, 19-byte command out, 25-byte session
 //      info, 46-byte readings, 44-byte decrypted payload.
 //
-//  WHAT IS NOT YET CONFIRMED (needs a real gen2 sensor or the binary's
-//  transport layer — the Python reference has no transport):
-//    - the exact BLE choreography: whether a kick-off write is needed, on which
-//      characteristic the challenge arrives, and how multi-notification
-//      messages are framed/reassembled. The reassembly below keys off message
-//      length, which is a placeholder until the framing is observed on-device.
-//  These sites are marked `GEN2-TRANSPORT-TODO`.
+//  BLE CHOREOGRAPHY (reverse-engineered from the official Abbott app; applied
+//  in Libre2DirectTransmitter, which owns the transport/reassembly):
+//    - kickoff: write {0x20} ("read security challenge") on F001.
+//    - F001 challenge: ONE 14-byte notification.
+//    - F001 session info: TWO notifications, 7 bytes THEN 18 (total 25).
+//    - F002 stream: each 46-byte record as THREE notifications, 20 THEN 18
+//      THEN 8, reassembled 20 || 18 || 8.
+//  Reassembly is keyed on the exchange phase there (the source characteristic
+//  is not available at the reassembly point); this handler only ever sees a
+//  fully reassembled message, so its length dispatch below is unambiguous.
+//
+//  STILL NEEDS A REAL-SENSOR CAPTURE: the exact per-chunk boundaries (7+18 and
+//  20+18+8) are not yet device-confirmed — only the message totals are. The
+//  reassembler is written to tolerate the split (see the GEN2-TRANSPORT-NOTE in
+//  Libre2DirectTransmitter.updateValueForGen2).
 //
 
 import Foundation
@@ -59,11 +67,12 @@ final class Libre2Gen2DirectHandler {
         }
     }
 
-    /// Classify a single reassembled message and advance the state machine.
-    ///
-    /// GEN2-TRANSPORT-TODO: dispatch is by length. Confirm against a real
-    /// sensor that these lengths are unambiguous on the wire (they are distinct
-    /// here: 14 / 25 / 46), and that readings cannot also be 25 bytes.
+    /// Classify a single *fully reassembled* message and advance the state
+    /// machine. The caller (Libre2DirectTransmitter) reassembles the raw
+    /// notifications by exchange phase before calling this, so the message
+    /// lengths dispatched on here are the whole-message totals and are
+    /// unambiguous: 14 (challenge) / 25 (session info) / >= 46 (reading). The
+    /// colliding raw-fragment lengths never reach this point.
     func ingest(_ message: [UInt8]) -> Libre2Gen2Action {
         do {
             switch message.count {

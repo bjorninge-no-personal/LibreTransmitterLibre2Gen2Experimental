@@ -13,19 +13,23 @@
 //  security version >= 9 (see `securityGeneration`). Generation 1 sensors use
 //  none of this; they are handled by `enum Libre2` in PreLibre2.swift.
 //
-//  NOTE ON KEYS: the three credential rows (two AES-128 keys each) are NOT
-//  embedded here. They belong to the publisher and must be supplied at runtime
-//  through a `Libre2Gen2KeyStore`. This file contains only the algorithms.
+//  NOTE ON KEYS: this is now the REAL Gen2 scheme, ported from Juggluco's
+//  `protocol.c` (the authoritative open-source reference). The key material is
+//  NOT account-tied: two compiled-in root tables (a "sensor" root and a
+//  "session" root) are selected by a root slot (1 or 2). The actual per-sensor
+//  keys are DERIVED from those roots. The root tables live in
+//  `Libre2Gen2Credentials.swift`; this file contains only the algorithms and
+//  the derivation.
 //
-//  NOTE ON THE KDF: `Libre2Gen2.derive(...)` implements NIST SP 800-108
-//  counter-mode framing with CMAC-AES-128. Per the reference, this one link is
-//  NOT confirmed against a real sensor. If it is wrong, every derived key is
-//  wrong, and the round-trip self-test cannot tell (it only checks that both
-//  sides agree with themselves). Settling it needs a real Gen2 sensor.
+//  NOTE ON THE KDF: `Libre2Gen2.derive(...)` is NIST SP 800-108 counter mode
+//  with the PRF = CMAC over Speck64/128 (an 8-byte block cipher), exactly as
+//  Juggluco implements it — NOT CMAC-AES-128. The earlier AES-CMAC port was a
+//  placeholder and produced wrong keys. The 16-byte derived key is
+//  CMAC(counter=1) || CMAC(counter=2), each 8 bytes. See `speckCMAC`/`derive`.
 //
 
 import Foundation
-import CommonCrypto
+import Security
 
 enum Libre2Gen2 {
 
@@ -54,9 +58,13 @@ enum Libre2Gen2 {
     static let productType = 3
     static let securityVersionMin = 9
 
-    // The two KDF labels differ only by the case of one letter.
-    static let authLabel = Array("ADC_*SpeckPatch#".utf8)
-    static let sessionLabel = Array("ADC_*SpecKpatch#".utf8)
+    // The two KDF labels differ only by the case of one letter, and BOTH carry a
+    // trailing NUL, so each is 17 bytes (Juggluco protocol.c: the labels are the
+    // 16 visible characters plus the C-string terminator, fed into the KDF).
+    //   sensor  = "ADC_*SpeckPatch#\0"  (lower-case k)
+    //   session = "ADC_*SpecKpatch#\0"  (CAPITAL K)
+    static let sensorLabel = Array("ADC_*SpeckPatch#".utf8) + [0x00]
+    static let sessionLabel = Array("ADC_*SpecKpatch#".utf8) + [0x00]
 
     struct Libre2Gen2Error: Error, LocalizedError {
         let errorDescription: String?
@@ -96,6 +104,22 @@ extension Libre2Gen2 {
             y = rol(y, 3) ^ x
         }
         return (x, y)
+    }
+
+    /// One raw Speck64/128 block encryption (`Speck_K(block)` in Juggluco's
+    /// protocol.c). Little-endian block I/O: the low word is `right = load32(in+0)`
+    /// and the high word is `left = load32(in+4)`; the 8-byte output is written
+    /// back in the same order. This is the cipher primitive underneath both the
+    /// CTR keystream and the Speck-CMAC PRF.
+    ///
+    /// Verified against the canonical Speck64/128 test vector (see
+    /// `Libre2Gen2Tests.testSpeckKnownAnswer`).
+    static func speckEncryptBlock(key: [UInt8], block: [UInt8]) -> [UInt8] {
+        let sk = speckSchedule(key)
+        let y0 = u32le(block, 0)   // right / low word
+        let x0 = u32le(block, 4)   // left / high word
+        let (x, y) = speckBlock(x0, y0, sk)
+        return le(y) + le(x)
     }
 
     /// Speck64/128 in counter mode, as the engine configures it.
@@ -180,104 +204,84 @@ extension Libre2Gen2 {
     }
 }
 
-// MARK: - CMAC-AES-128 and SP 800-108 derivation
+// MARK: - CMAC over Speck64/128, and SP 800-108 derivation
 
 extension Libre2Gen2 {
-    /// A single AES-128 ECB block (no padding), used only to build CMAC.
-    private static func aesEncryptBlock(key: [UInt8], block: [UInt8]) throws -> [UInt8] {
-        precondition(key.count == 16 && block.count == 16)
-        var out = [UInt8](repeating: 0, count: 16)
-        var moved = 0
-        let status = key.withUnsafeBytes { keyPtr in
-            block.withUnsafeBytes { dataPtr in
-                out.withUnsafeMutableBytes { outPtr in
-                    CCCrypt(
-                        CCOperation(kCCEncrypt),
-                        CCAlgorithm(kCCAlgorithmAES),
-                        CCOptions(kCCOptionECBMode),
-                        keyPtr.baseAddress, key.count,
-                        nil,
-                        dataPtr.baseAddress, block.count,
-                        outPtr.baseAddress, outPtr.count,
-                        &moved)
-                }
-            }
-        }
-        guard status == kCCSuccess, moved == 16 else {
-            throw Libre2Gen2Error("AES block failed (status \(status))")
-        }
-        return out
-    }
+    static let speckBlockLength = 8     // Speck64/128 block size
+    private static let cmacRb: UInt8 = 0x1b   // Juggluco uses 0x1b (not the GF(2^64) 0x1b/… AES 0x87)
 
-    private static func leftShiftOne(_ input: [UInt8]) -> [UInt8] {
+    /// CMAC subkey doubling over a 64-bit block (Juggluco `double`): left-shift
+    /// the whole block by one bit, and if the top bit was set, XOR the reduction
+    /// constant 0x1b into the last byte.
+    static func cmacDouble(_ input: [UInt8]) -> [UInt8] {
         var output = [UInt8](repeating: 0, count: input.count)
-        var overflow: UInt8 = 0
+        var carry: UInt8 = 0
         for i in stride(from: input.count - 1, through: 0, by: -1) {
-            output[i] = (input[i] << 1) | overflow
-            overflow = (input[i] & 0x80) != 0 ? 1 : 0
+            output[i] = (input[i] << 1) | carry
+            carry = (input[i] & 0x80) != 0 ? 1 : 0
         }
+        if (input[0] & 0x80) != 0 { output[input.count - 1] ^= cmacRb }
         return output
     }
 
-    /// CMAC-AES-128 (RFC 4493) over an arbitrary-length message.
-    static func cmac(key: [UInt8], message: [UInt8]) throws -> [UInt8] {
-        guard key.count == 16 else {
-            throw Libre2Gen2Error("cmac key of \(key.count) bytes, expected 16")
-        }
-        let rb: UInt8 = 0x87
-        let zero = [UInt8](repeating: 0, count: 16)
+    /// CMAC with the Speck64/128 block cipher as the PRF (Juggluco protocol.c).
+    /// Same construction as RFC 4493 CMAC-AES, but with an 8-byte block and the
+    /// 0x1b reduction constant: subkey L = Speck_K(0^8), K1 = double(L),
+    /// K2 = double(K1); the final block is XORed with K1 when it is full and K2
+    /// when it was padded with 0x80.
+    static func speckCMAC(key: [UInt8], message: [UInt8]) -> [UInt8] {
+        let bs = speckBlockLength
+        let zero = [UInt8](repeating: 0, count: bs)
 
-        // Subkey generation.
-        let l = try aesEncryptBlock(key: key, block: zero)
-        var k1 = leftShiftOne(l)
-        if (l[0] & 0x80) != 0 { k1[15] ^= rb }
-        var k2 = leftShiftOne(k1)
-        if (k1[0] & 0x80) != 0 { k2[15] ^= rb }
+        let l = speckEncryptBlock(key: key, block: zero)
+        let k1 = cmacDouble(l)
+        let k2 = cmacDouble(k1)
 
-        // Last block.
-        let n = (message.count + 15) / 16
-        let complete = message.count > 0 && message.count % 16 == 0
-        let blocks = max(n, 1)
+        let complete = message.count > 0 && message.count % bs == 0
+        let blocks = max((message.count + bs - 1) / bs, 1)
 
         var lastBlock: [UInt8]
         if complete {
-            lastBlock = Array(message[(blocks - 1) * 16 ..< blocks * 16])
-            lastBlock = zip(lastBlock, k1).map { $0 ^ $1 }
+            lastBlock = zip(Array(message[(blocks - 1) * bs ..< blocks * bs]), k1).map { $0 ^ $1 }
         } else {
-            let start = (blocks - 1) * 16
-            var padded = Array(message[start...])
+            var padded = Array(message[((blocks - 1) * bs)...])
             padded.append(0x80)
-            while padded.count < 16 { padded.append(0x00) }
+            while padded.count < bs { padded.append(0x00) }
             lastBlock = zip(padded, k2).map { $0 ^ $1 }
         }
 
         // CBC-MAC with a zero IV.
         var x = zero
         for i in 0..<(blocks - 1) {
-            let block = Array(message[i * 16 ..< (i + 1) * 16])
-            x = try aesEncryptBlock(key: key, block: zip(x, block).map { $0 ^ $1 })
+            let block = Array(message[i * bs ..< (i + 1) * bs])
+            x = speckEncryptBlock(key: key, block: zip(x, block).map { $0 ^ $1 })
         }
-        return try aesEncryptBlock(key: key, block: zip(x, lastBlock).map { $0 ^ $1 })
+        return speckEncryptBlock(key: key, block: zip(x, lastBlock).map { $0 ^ $1 })
     }
 
-    /// NIST SP 800-108 key derivation, counter mode — NOT MEASURED. See the
-    /// file header. Framing:
+    /// NIST SP 800-108 key derivation in counter mode, PRF = Speck-CMAC, exactly
+    /// as Juggluco's `derive_key` builds it. Each PRF message is
     ///
-    ///     K(i) = CMAC(key, i(4, big-endian) || label || 0x00
-    ///                     || context || L(4, big-endian))
+    ///     counter(1 byte) || label || context || outputBits{0x80, 0x00}
+    ///
+    /// and the output is the 8-byte CMAC blocks concatenated: for a 16-byte key,
+    /// CMAC(counter=1) || CMAC(counter=2). The label already includes its
+    /// trailing NUL (see `sensorLabel`/`sessionLabel`), and `context` is the
+    /// UID-minus-last-2 (sensor key) or the 16-byte session context.
     static func derive(key: [UInt8], label: [UInt8], context: [UInt8],
                        length: Int = keyLength) throws -> [UInt8] {
+        guard key.count == keyLength else {
+            throw Libre2Gen2Error("derive key of \(key.count) bytes, expected \(keyLength)")
+        }
         var out = [UInt8]()
-        var counter: UInt32 = 1
-        let lBits = UInt32(length * 8)
+        var counter: UInt8 = 1
         while out.count < length {
-            var input = be(counter)
-            input += label
-            input.append(0x00)
-            input += context
-            input += be(lBits)
-            out += try cmac(key: key, message: input)
-            counter += 1
+            var message = [counter]
+            message += label
+            message += context
+            message += [0x80, 0x00]        // output length field, verbatim from Juggluco
+            out += speckCMAC(key: key, message: message)
+            counter &+= 1
         }
         return Array(out[0..<length])
     }
@@ -311,27 +315,35 @@ extension Libre2Gen2 {
 
 // MARK: - Credentials
 
-/// One row of the credential table, picked by its index. The same index serves
-/// both derivations: `authKey` yields kAuth (opening exchange), and
-/// `sessionGeneratorKey` yields the reading key. The index enters no context,
-/// no nonce and no transmitted byte; it only selects the row.
+/// One selected root slot (Juggluco: a `root_slot`, 1 or 2). It carries the two
+/// 16-byte compiled-in roots for that slot and derives the per-sensor keys from
+/// them. `index` is the selecting slot and enters no context, no nonce and no
+/// transmitted byte.
+///
+/// NAMING: `authKey` is the slot's SENSOR root (`sensor_roots[slot-1]`) and
+/// `sessionGeneratorKey` is the slot's SESSION root (`session_roots[slot-1]`).
+/// The names are kept for source compatibility with the BLE handler/keystore.
 struct Libre2Gen2Credential {
     let index: Int
-    let authKey: [UInt8]
-    let sessionGeneratorKey: [UInt8]
+    let authKey: [UInt8]                // sensor_roots[slot-1]
+    let sessionGeneratorKey: [UInt8]    // session_roots[slot-1]
 
-    /// kAuth, derived from the sensor UID and nothing else. The context is
-    /// UID[0..<6], the serial without the manufacturer code and ISO prefix.
+    /// kAuth, the sensor key = derive_key(sensor_root, sensorLabel, UID without
+    /// its last 2 bytes). For an 8-byte ISO 15693 UID that is UID[0..<6] — the
+    /// serial without the manufacturer code and ISO prefix (Juggluco uses
+    /// `uidSize - 2`).
     func kauth(uid: [UInt8]) throws -> [UInt8] {
         guard uid.count == Libre2Gen2.uidLength else {
             throw Libre2Gen2.Libre2Gen2Error("uid of \(uid.count) bytes, expected \(Libre2Gen2.uidLength)")
         }
         return try Libre2Gen2.derive(key: authKey,
-                                     label: Libre2Gen2.authLabel,
-                                     context: Array(uid[0..<Libre2Gen2.contextLength]))
+                                     label: Libre2Gen2.sensorLabel,
+                                     context: Array(uid[0..<(uid.count - 2)]))
     }
 
-    /// The reading key. The context comes out of the sensor's reply.
+    /// The reading key = derive_key(session_root, sessionLabel, sessionContext16).
+    /// The 16-byte context comes out of the sensor's decrypted auth reply
+    /// (plaintext bytes [7..23)).
     func sessionKey(context: [UInt8]) throws -> [UInt8] {
         guard context.count == Libre2Gen2.keyLength else {
             throw Libre2Gen2.Libre2Gen2Error("context of \(context.count) bytes, expected \(Libre2Gen2.keyLength)")
@@ -342,8 +354,8 @@ struct Libre2Gen2Credential {
     }
 }
 
-/// Supplies the publisher's credential rows at runtime. Implementations keep
-/// the key material out of version control.
+/// Supplies the root-slot credential at runtime. The real root tables are in
+/// `Libre2Gen2Credentials.swift`; `index` is the root slot (1 or 2).
 protocol Libre2Gen2KeyStore {
     func credential(forIndex index: Int) -> Libre2Gen2Credential?
 }
@@ -542,12 +554,4 @@ private func le(_ value: UInt32) -> [UInt8] {
      UInt8((value >> 8) & 0xFF),
      UInt8((value >> 16) & 0xFF),
      UInt8((value >> 24) & 0xFF)]
-}
-
-/// 4 big-endian bytes of a u32.
-private func be(_ value: UInt32) -> [UInt8] {
-    [UInt8((value >> 24) & 0xFF),
-     UInt8((value >> 16) & 0xFF),
-     UInt8((value >> 8) & 0xFF),
-     UInt8(value & 0xFF)]
 }

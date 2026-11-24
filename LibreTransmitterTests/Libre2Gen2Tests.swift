@@ -97,6 +97,27 @@ final class Libre2Gen2Tests: XCTestCase {
         XCTAssertFalse(Libre2Gen2.checkCRC(corrupted))
     }
 
+    /// Canonical Speck64/128 known-answer test (the vector published with the
+    /// cipher and used by Juggluco protocol.c). This pins the round function,
+    /// key schedule and little-endian block I/O so the derived keys match a real
+    /// sensor, which no round-trip self-test could catch.
+    func testSpeckKnownAnswer() {
+        let key: [UInt8] = [0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27]
+        let plaintext: [UInt8] = [0x2d, 0x43, 0x75, 0x74, 0x74, 0x65, 0x72, 0x3b]
+        let expected: [UInt8] = [0x8b, 0x02, 0x4e, 0x45, 0x48, 0xa5, 0x6f, 0x8c]
+        XCTAssertEqual(Libre2Gen2.speckEncryptBlock(key: key, block: plaintext), expected)
+    }
+
+    /// The root tables must be transcribed exactly, or every derived key is wrong.
+    func testRootTablesPresent() {
+        XCTAssertEqual(Libre2Gen2.sensorRoots.count, 2)
+        XCTAssertEqual(Libre2Gen2.sessionRoots.count, 2)
+        XCTAssertEqual(Libre2Gen2.sensorRoots[0].first, 0xa1)
+        XCTAssertEqual(Libre2Gen2.sessionRoots[1].first, 0x4e)
+        XCTAssertEqual(Libre2Gen2.credential(rootSlot: 1)?.authKey, Libre2Gen2.sensorRoots[0])
+        XCTAssertNil(Libre2Gen2.credential(rootSlot: 3))
+    }
+
     func testSpeckIsItsOwnInverse() throws {
         let key = Array(repeating: UInt8(0x5A), count: 16)
         let iv = Array(repeating: UInt8(0x01), count: 8)

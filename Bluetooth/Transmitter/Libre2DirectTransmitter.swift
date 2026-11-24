@@ -67,6 +67,20 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
         return handler
     }()
 
+    // Where we are in the gen2 BLE exchange. Reassembly (updateValueForGen2) is
+    // keyed on this phase rather than on raw notification length, because the
+    // individual notification fragments collide across phases: an 18-byte
+    // fragment is both the second half of session info (7 + 18) and the middle
+    // of a glucose record (20 + 18 + 8). The handshake drives the phase
+    // deterministically: kickoff -> challenge -> command -> session info ->
+    // stream. See updateValueForGen2 for the reverse-engineered framing.
+    private enum Gen2Phase {
+        case awaitingChallenge    // F001: a single 14-byte challenge notification
+        case awaitingSessionInfo  // F001: a 7-byte then an 18-byte notification (total 25)
+        case streaming            // F002: 20 + 18 + 8 notifications per 46-byte record
+    }
+    private var gen2Phase: Gen2Phase = .awaitingChallenge
+
     class func canSupportPeripheral(_ peripheral: PeripheralProtocol) -> Bool {
         // name can be one of the following formats:
         // <description>: example
@@ -140,6 +154,12 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
             // kickoff write is delivered. (Cross-referenced against both projects;
             // exact on-wire timing still warrants verification on a real sensor.)
             peripheral.setNotifyValue(true, for: writeCharacteristics)
+            // Fresh connection: restart reassembly at the top of the handshake.
+            // (reset() is left phase-agnostic so the shared inter-notification
+            // timeout can drop a partial buffer mid-stream without rewinding the
+            // handshake; the phase is only rewound here, on a new kickoff.)
+            gen2Phase = .awaitingChallenge
+            rxBuffer.resetAllBytes()
             let kickoff = Data([Libre2Gen2.cmdReadChallenge])
             logger.debug("gen2: enabled notify on write characteristic; writing read-security-challenge kickoff: \(kickoff.hexEncodedString())")
             delegate?.libreDeviceLogMessage(payload: "gen2 kickoff (read security challenge): \(kickoff.hexEncodedString())", type: .send)
@@ -283,19 +303,73 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
 
     // MARK: - Gen2 message handling
 
-    /// GEN2-TRANSPORT-TODO: reassembly is by accumulating notifications until a
-    /// recognised complete length is reached (14 challenge / 25 session info /
-    /// 46 reading). This is a placeholder for the real on-wire framing, which
-    /// must be confirmed against a sensor; a length-collision or a partial read
-    /// would desync this buffer.
+    /// Reassembles gen2 BLE notifications into whole messages and drives the
+    /// handshake/stream state machine.
+    ///
+    /// Framing reverse-engineered from the official Abbott app (treated as
+    /// ground truth; the exact per-chunk boundaries still want confirmation on
+    /// a real sensor — see the note below):
+    ///
+    ///   - Handshake on F001 (login characteristic):
+    ///       * challenge   — ONE 14-byte notification.
+    ///       * session info — TWO notifications, a 7-byte chunk THEN an 18-byte
+    ///         chunk, reassembled in order  7 || 18 = 25.
+    ///   - Stream on F002 (raw glucose characteristic):
+    ///       * each 46-byte record — THREE notifications, 20 THEN 18 THEN 8,
+    ///         reassembled in order  20 || 18 || 8 = 46.
+    ///
+    /// Why reassembly is keyed on the exchange phase and not on which
+    /// characteristic a notification arrived on: the source characteristic is
+    /// not available here. The BLE router
+    /// (LibreTransmitterProxyManager.didUpdateValueFor) forwards only the
+    /// write-target handle — always F001 — not the characteristic the
+    /// notification actually came from, so F001-vs-F002 cannot be recovered at
+    /// this point without plumbing a new argument through the plugin protocol.
+    /// Instead we key on `gen2Phase`, which the handshake advances
+    /// deterministically. That also disambiguates fragments whose raw lengths
+    /// collide across phases (an 18-byte fragment is session info's 2nd chunk
+    /// while awaiting session info, but a record's middle chunk while
+    /// streaming).
+    ///
+    /// A missing fragment is covered by the shared ~10s inter-notification
+    /// timeout in LibreTransmitterProxyManager, which calls reset() to drop the
+    /// partial buffer. reset() is intentionally phase-agnostic, so a drop
+    /// mid-stream clears the partial record without rewinding the completed
+    /// handshake; the next record then reassembles cleanly in the same phase.
+    ///
+    /// GEN2-TRANSPORT-NOTE (needs a real-sensor capture): the message *totals*
+    /// (14 / 25 / 46) are RE'd ground truth, but the exact chunk split within a
+    /// message (7+18, and 20+18+8) is not yet device-confirmed. Reassembly is
+    /// therefore tolerant of the split — fragments arrive in order and are
+    /// appended, and a message is emitted once its phase's total is reached —
+    /// but the observed fragmentation is logged so a capture can confirm the
+    /// boundaries.
     private func updateValueForGen2(_ value: Data, peripheral: CBPeripheral, writeCharacteristic: CBCharacteristic?) {
         rxBuffer.append(value)
         delegate?.libreDeviceLogMessage(payload: "gen2 received value: \(value.toDebugString())", type: .receive)
 
-        let recognised: Set<Int> = [Libre2Gen2.challengeLength,
-                                    Libre2Gen2.sessionInfoLength,
-                                    Libre2Gen2.packetLength]
-        guard recognised.contains(rxBuffer.count) else {
+        // Expected total length of the message currently being reassembled,
+        // selected by phase (14 challenge / 25 session info / 46 record).
+        let expectedLength: Int
+        switch gen2Phase {
+        case .awaitingChallenge:   expectedLength = Libre2Gen2.challengeLength   // 14, single notification
+        case .awaitingSessionInfo: expectedLength = Libre2Gen2.sessionInfoLength // 25, as 7 || 18
+        case .streaming:           expectedLength = Libre2Gen2.packetLength      // 46, as 20 || 18 || 8
+        }
+
+        if rxBuffer.count > expectedLength {
+            // Overshoot: a dropped or duplicated fragment has desynced the
+            // buffer. Drop the partial and wait for the next clean sequence;
+            // the phase is retained (a mid-stream glitch must not rewind the
+            // handshake).
+            logger.debug("gen2: reassembly overshoot in phase \(String(describing: self.gen2Phase)) (\(self.rxBuffer.count) > \(expectedLength)); dropping partial buffer")
+            rxBuffer.resetAllBytes()
+            return
+        }
+
+        guard rxBuffer.count == expectedLength else {
+            // Still waiting for the remaining fragment(s) of this message.
+            logger.debug("gen2: reassembling in phase \(String(describing: self.gen2Phase)): \(self.rxBuffer.count)/\(expectedLength) bytes")
             return
         }
 
@@ -309,6 +383,9 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
                 logger.debug("gen2: no write characteristic to send command")
                 return
             }
+            // Challenge answered; the sensor now replies with session info on
+            // F001 as a 7-byte then an 18-byte notification.
+            gen2Phase = .awaitingSessionInfo
             delegate?.libreDeviceLogMessage(payload: "gen2 writing command: \(Data(bytes).hexEncodedString())", type: .send)
             peripheral.writeValue(Data(bytes), for: writeCharacteristic, type: .withResponse)
 
@@ -317,7 +394,12 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
             emit(decryptedBLE: Data(payload), sensor: sensor)
 
         case .none:
-            break
+            // Session info has opened the session: glucose records now stream on
+            // F002 as 20 + 18 + 8. (`.none` is also the no-op for a record seen
+            // before the handshake completed, which must leave the phase alone.)
+            if case .awaitingSessionInfo = gen2Phase {
+                gen2Phase = .streaming
+            }
 
         case .failure:
             delegate?.libreSensorDidUpdate(with: .checksumValidationError)
