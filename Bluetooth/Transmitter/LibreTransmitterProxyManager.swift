@@ -449,6 +449,20 @@ public final class LibreTransmitterProxyManager: NSObject, CBCentralManagerDeleg
     }
     
    
+    /// Whether a name of the form ABBOTT<serial number> belongs to the sensor with this uid. The
+    /// serial number's first character is the product family, so only the ten characters derived
+    /// from the uid are compared.
+    static func nameMatchesSerial(_ name: String, uid: Data) -> Bool {
+        let prefix = "ABBOTT"
+        guard name.uppercased().hasPrefix(prefix),
+              let serial = SensorSerialNumber(withUID: uid, sensorFamily: .libre2)?.serialNumber,
+              serial.count == 11 else {
+            return false
+        }
+        let advertised = name.uppercased().dropFirst(prefix.count)
+        return advertised.count == 11 && advertised.dropFirst() == serial.dropFirst()
+    }
+
     private func verifyLibre2ManufacturerData(peripheral: CBPeripheral, selectedUid: Data ,advertisementData: [String: Any]) -> Bool {
         guard let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data else {
             logger.debug("manufacturerData was not retrieved")
@@ -494,8 +508,14 @@ public final class LibreTransmitterProxyManager: NSObject, CBCentralManagerDeleg
              // Starting in mid 2025, libre2 plus sensors in europe identify them self with
              // their mac address in the device name
              if let peripheralName = peripheral.name, let preselectedMac = sensor?.macAddress  {
-                 verified = peripheralName == preselectedMac
+                 verified = peripheralName.caseInsensitiveCompare(preselectedMac) == .orderedSame
                  logger.debug("Verifiying libre2 connection using mac address method:. \(verified)")
+             }
+
+             // Older sensors identify themselves as ABBOTT<serial number>
+             if !verified, let peripheralName = peripheral.name {
+                 verified = Self.nameMatchesSerial(peripheralName, uid: selectedUid)
+                 logger.debug("Verifiying libre2 connection using serial number method: \(verified)")
              }
              
              if !verified {

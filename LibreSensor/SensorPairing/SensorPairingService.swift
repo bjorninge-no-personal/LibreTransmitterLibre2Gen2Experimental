@@ -17,6 +17,7 @@ public enum PairingError: Error {
     case noPatchInfo
     case nfcNotSupported
     case gen2CredentialsUnavailable
+    case readInterrupted
 }
 
 extension PairingError: LocalizedError {
@@ -36,6 +37,8 @@ extension PairingError: LocalizedError {
             return LocalizedString("Phone NFC not supported!", comment: "error description for PairingError.nfcNotSupported")
         case .gen2CredentialsUnavailable:
             return LocalizedString("Could not read streaming credentials from this sensor", comment: "error description for PairingError.gen2CredentialsUnavailable")
+        case .readInterrupted:
+            return LocalizedString("The sensor scan was interrupted", comment: "error description for PairingError.readInterrupted")
         }
     }
 
@@ -45,6 +48,8 @@ extension PairingError: LocalizedError {
             return LocalizedString("Your phone or app is not enabled for NFC communications, which is needed to pair to libre2 sensors", comment: "Recovery suggestion for PairingError.nfcNotSupported")
         case .gen2CredentialsUnavailable:
             return LocalizedString("This sensor uses a newer security generation that is not fully supported yet", comment: "Recovery suggestion for PairingError.gen2CredentialsUnavailable")
+        case .readInterrupted:
+            return LocalizedString("Hold the top of your phone still against the sensor until the scan finishes, and try again", comment: "Recovery suggestion for PairingError.readInterrupted")
         default:
             return nil
         }

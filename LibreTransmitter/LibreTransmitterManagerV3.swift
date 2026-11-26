@@ -426,7 +426,8 @@ extension LibreTransmitterManagerV3 {
                 self.sensorInfoObservable.sensorAgeLeft = humanReadableTimeLeft
                 self.sensorInfoObservable.sensorState = "Operational"
                 self.sensorInfoObservable.sensorState = "Operational"
-                let family = SensorFamily.libre2
+                // The serial number starts with the product family, patchInfo[2]'s high nibble
+                let family = sensor.patchInfo.count > 2 ? SensorFamily(rawValue: Int(sensor.patchInfo[2] >> 4)) ?? .libre2 : .libre2
                 self.sensorInfoObservable.sensorSerial = SensorSerialNumber(withUID: sensor.uuid, sensorFamily: family)?.serialNumber ?? "-"
 
                 if let mapping = UserDefaults.standard.calibrationMapping,

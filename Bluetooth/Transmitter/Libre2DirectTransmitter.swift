@@ -56,18 +56,33 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     // Routing follows what the sensor is, not whether the handler could be
     // built: a gen2 sensor without credentials or keys must never fall back to
     // the gen1 unlock, it simply cannot stream.
-    private lazy var isGen2: Bool = UserDefaults.standard.preSelectedSensor?.securityGeneration == 2
+    //
+    // Both are taken from the paired sensor at the start of each connection
+    // (refreshGen2Sensor), so a sensor paired since this object was created
+    // is never handled with the previous sensor's credentials.
+    private var isGen2 = false
+    private var gen2Handler: Libre2Gen2DirectHandler?
+    private var gen2HandlerCredentials: (uuid: Data, keyIndex: Int?, streamingAuthData: Data?)?
 
-    private lazy var gen2Handler: Libre2Gen2DirectHandler? = {
-        guard self.isGen2, let sensor = UserDefaults.standard.preSelectedSensor else {
-            return nil
+    private func refreshGen2Sensor() {
+        let sensor = UserDefaults.standard.preSelectedSensor
+        isGen2 = sensor?.securityGeneration == 2
+        guard isGen2, let sensor else {
+            gen2Handler = nil
+            gen2HandlerCredentials = nil
+            return
         }
-        let handler = Libre2Gen2DirectHandler(sensor: sensor, keyStore: Libre2Gen2RootKeyStore())
-        if handler == nil {
-            self.logger.debug("gen2 sensor paired but handler unavailable (missing NFC credentials or keys)")
+        if let built = gen2HandlerCredentials, built.uuid == sensor.uuid, built.keyIndex == sensor.keyIndex,
+           built.streamingAuthData == sensor.streamingAuthData {
+            return
         }
-        return handler
-    }()
+        gen2Handler = Libre2Gen2DirectHandler(sensor: sensor, keyStore: Libre2Gen2RootKeyStore())
+        gen2HandlerCredentials = (sensor.uuid, sensor.keyIndex, sensor.streamingAuthData)
+        gen2Phase = .awaitingNotify
+        if gen2Handler == nil {
+            logger.debug("gen2 sensor paired but handler unavailable (missing NFC credentials or keys)")
+        }
+    }
 
     // Where we are in the gen2 BLE exchange, following LibreLink's BLE callback
     // class: notifications are enabled on F001 only; once that completes, the
@@ -134,6 +149,7 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     required init(delegate: LibreTransmitterDelegate, advertisementData: [String: Any]?) {
         // advertisementData is unknown for the miaomiao
         self.delegate = delegate
+        refreshGen2Sensor()
     }
 
     func requestData(writeCharacteristics: CBCharacteristic, peripheral: CBPeripheral) {
@@ -167,6 +183,7 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     }
 
     func didDiscoverWriteCharacteristics(_ peripheral: CBPeripheral, writeCharacteristics: CBCharacteristic) {
+        refreshGen2Sensor()
 
         if isGen2 {
             // Gen2 uses a challenge/response handshake, not the gen1 streaming
@@ -206,6 +223,7 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     }
 
     func didDiscoverNotificationCharacteristic(_ peripheral: CBPeripheral, notifyCharacteristic: CBCharacteristic) {
+        refreshGen2Sensor()
 
         if isGen2 {
             // Enabled once the session is open (updateValueForGen2), as LibreLink does

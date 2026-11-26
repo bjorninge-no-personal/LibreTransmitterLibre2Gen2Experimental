@@ -51,7 +51,7 @@ struct ModeSelectionView: View {
                     InstructionList(instructions: [
                         LocalizedString("Sensor should be activated and fully warmed up.", comment: "Label text for step 1 of connection setup"),
                         LocalizedString("Select the type of setup you want.", comment: "Label text for step 2 of connection setup"),
-                        LocalizedString("Most libre 1 and libre 2 sensors are supported, except North America Libre 2; see readme.md for details.", comment: "Label text for step 3 of connection setup"),
+                        LocalizedString("Most libre 1 and libre 2 sensors are supported. Support for North American Libre 2 and Libre 2 Plus sensors is experimental and has not been tested on a real sensor yet; see readme.md for details.", comment: "Label text for step 3 of connection setup"),
                         LocalizedString("Fair warning: The sensor will be not be using the manufacturer's algorithm, and some safety mitigations present in the manufacturers algorithm might be missing when you use this.", comment: "Label text for step 4 of connection setup")
                     ])
                 }

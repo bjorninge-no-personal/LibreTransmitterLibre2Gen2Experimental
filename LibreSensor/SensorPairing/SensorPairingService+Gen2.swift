@@ -64,7 +64,7 @@ enum Libre2Gen2Pairing {
         }
         let rootSlot = Int(slotReply[2]) | (Int(slotReply[3]) << 8)
         guard let credential = keyStore.credential(forIndex: rootSlot) else {
-            throw Libre2Gen2.Libre2Gen2Error("root slot \(rootSlot) not present")
+            throw PairingError.gen2CredentialsUnavailable
         }
 
         // FRAM: an authenticated 0x1F, then encrypted A1 21 reads.
@@ -85,7 +85,7 @@ enum Libre2Gen2Pairing {
         // Calibration comes from FRAM, and glucose is computed from it. Never
         // store calibration from bytes that are not self-consistent.
         guard let sensorData = SensorData(bytes: fram), sensorData.hasValidCRCs else {
-            throw Libre2Gen2.Libre2Gen2Error("decrypted FRAM does not pass its CRCs")
+            throw PairingError.decryptionError
         }
 
         // Enable streaming last: an authenticated 0x1E.
@@ -139,8 +139,11 @@ extension SensorPairingService {
                 session.invalidate()
             } catch {
                 logger.error("gen2: pairing failed: \(error.localizedDescription)")
-                session.invalidate(errorMessage: PairingError.gen2CredentialsUnavailable.localizedDescription)
-                self.sendError(PairingError.gen2CredentialsUnavailable)
+                // Only an unknown root slot means the sensor can't be supported; anything
+                // else (a dropped NFC exchange, an unexpected reply) is worth a new scan
+                let pairingError = error as? PairingError ?? .readInterrupted
+                session.invalidate(errorMessage: pairingError.localizedDescription)
+                self.sendError(pairingError)
             }
         }
     }

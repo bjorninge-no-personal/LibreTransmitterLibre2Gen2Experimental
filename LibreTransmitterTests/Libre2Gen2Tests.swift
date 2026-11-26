@@ -201,6 +201,17 @@ final class Libre2Gen2Tests: XCTestCase {
         XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x5A, 0x02]), 0)
     }
 
+    func testAbbottNameMatchesTheSerialNumber() {
+        // The uid from SensorSerialNumber's worked example, whose serial is "M00009DHCR" after the family
+        let uid = Data(Self.bytes("5e902500 00a007e0".replacingOccurrences(of: " ", with: "")))
+        XCTAssertTrue(LibreTransmitterProxyManager.nameMatchesSerial("ABBOTT3M00009DHCR", uid: uid))
+        XCTAssertTrue(LibreTransmitterProxyManager.nameMatchesSerial("abbott3m00009dhcr", uid: uid))
+        XCTAssertTrue(LibreTransmitterProxyManager.nameMatchesSerial("ABBOTT7M00009DHCR", uid: uid))
+        XCTAssertFalse(LibreTransmitterProxyManager.nameMatchesSerial("ABBOTT3M00009DHCX", uid: uid))
+        XCTAssertFalse(LibreTransmitterProxyManager.nameMatchesSerial("ABBOTT3M00009DHC", uid: uid))
+        XCTAssertFalse(LibreTransmitterProxyManager.nameMatchesSerial("A4B7C9023F8D", uid: uid))
+    }
+
     func testSessionResetForgetsTheKey() throws {
         let sensor = try FakeGen2Sensor(index: 1, keyStore: keyStore)
         let session = try Libre2Gen2Session(uid: sensor.uid, keyIndex: 1,
@@ -244,7 +255,8 @@ final class Libre2Gen2Tests: XCTestCase {
             XCTFail("pairing should fail on the unknown root slot")
         } catch is Dropped {
             XCTFail("the dropped exchange should have been retried")
-        } catch {
+        } catch PairingError.gen2CredentialsUnavailable {
+            // only an unknown root slot reports the sensor as unsupported
         }
         XCTAssertEqual(sent, [Data([Libre2Gen2.cmdReadRootSlot]), Data([Libre2Gen2.cmdReadRootSlot])])
     }
