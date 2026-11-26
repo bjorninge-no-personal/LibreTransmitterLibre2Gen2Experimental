@@ -13,21 +13,20 @@
 //    - message shapes: 14-byte challenge, 19-byte command out, 25-byte session
 //      info, 46-byte readings, 44-byte decrypted payload.
 //
-//  BLE CHOREOGRAPHY (reverse-engineered from the official Abbott app; applied
-//  in Libre2DirectTransmitter, which owns the transport/reassembly):
-//    - kickoff: write {0x20} ("read security challenge") on F001.
+//  BLE CHOREOGRAPHY (LibreLink's BLE callback class; applied in
+//  Libre2DirectTransmitter, which owns the transport/reassembly):
+//    - enable notifications on F001 only; once that completes, write {0x20}
+//      ("read security challenge") on F001.
 //    - F001 challenge: ONE 14-byte notification.
 //    - F001 session info: TWO notifications, 7 bytes THEN 18 (total 25).
-//    - F002 stream: each 46-byte record as THREE notifications, 20 THEN 18
-//      THEN 8, reassembled 20 || 18 || 8.
-//  Reassembly is keyed on the exchange phase there (the source characteristic
-//  is not available at the reassembly point); this handler only ever sees a
-//  fully reassembled message, so its length dispatch below is unambiguous.
+//    - only once the session is open, enable notifications on F002.
+//    - F002 stream: each 46-byte record as THREE notifications of 20, 18 and
+//      8 bytes, placed by length at 0, 20 and 38 as LibreLink does.
+//  This handler only ever sees a fully reassembled message, so its length
+//  dispatch below is unambiguous.
 //
-//  STILL NEEDS A REAL-SENSOR CAPTURE: the exact per-chunk boundaries (7+18 and
-//  20+18+8) are not yet device-confirmed — only the message totals are. The
-//  reassembler is written to tolerate the split (see the GEN2-TRANSPORT-NOTE in
-//  Libre2DirectTransmitter.updateValueForGen2).
+//  STILL NEEDS A REAL-SENSOR CAPTURE: the sequence and chunk lengths are
+//  LibreLink's, but have not been seen on a real gen2 sensor here.
 //
 
 import Foundation
@@ -105,31 +104,10 @@ final class Libre2Gen2DirectHandler {
     }
 
     var isOpen: Bool { session.sessionKey != nil }
-}
 
-// MARK: - Key store
-
-/// Holder for the publisher's credential rows. The index selects a row; its two
-/// AES-128 keys feed the kAuth (opening exchange) and session-key derivations.
-/// An unknown index fails closed with "key index not present".
-final class Libre2Gen2RuntimeKeyStore: Libre2Gen2KeyStore {
-    static let shared = Libre2Gen2RuntimeKeyStore()
-
-    private static let rows: [Int: (auth: [UInt8], session: [UInt8])] = [
-        0: (auth: Array("a07b7aa90fe59d37c8d717d168d8b012".hexadecimal()!),
-            session: Array("a07b7aa90fe59d37c8d717d168d8b012".hexadecimal()!)),
-        1: (auth: Array("a1aa738f0cf75801a16dd4f7906e972a".hexadecimal()!),
-            session: Array("e82f8fc32199563cfda80c7f6c2a6721".hexadecimal()!)),
-        2: (auth: Array("3ce8bdbb8cb30a48a7d693f7b72eec6c".hexadecimal()!),
-            session: Array("4e2873bd16c54adce038ead5b25b68a3".hexadecimal()!)),
-    ]
-
-    private init() {}
-
-    var hasKeys: Bool { !Self.rows.isEmpty }
-
-    func credential(forIndex index: Int) -> Libre2Gen2Credential? {
-        guard let row = Self.rows[index] else { return nil }
-        return Libre2Gen2Credential(index: index, authKey: row.auth, sessionGeneratorKey: row.session)
+    /// Called on each new connection, before the kickoff: the sensor opens a
+    /// new session every time, so the previous one's key must not be used.
+    func reset() {
+        session.reset()
     }
 }

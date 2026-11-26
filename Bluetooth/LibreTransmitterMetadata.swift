@@ -112,6 +112,8 @@ public enum SensorType: String, CustomStringConvertible {
         case 0x70: self = .libreProH
         case 0xC5, 0x9D, 0xC6, 0x7F: self = .libre2
         case 0x76: self = patchInfo[3] == 0x02 ? .libre2US : patchInfo[3] == 0x04 ? .libre2CA : patchInfo[2] >> 4 == 7 ? .libreSense : .unknown
+        // Libre 2 Plus (gen2), e.g. US 2C 0A 3A 02; the region byte tells US from CA
+        case 0x2C: self = patchInfo[3] == 0x02 ? .libre2US : patchInfo[3] == 0x04 ? .libre2CA : .unknown
         default:
             if patchInfo.count == 24 {
                 self = .libre3

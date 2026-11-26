@@ -10,7 +10,8 @@
 //  decrypted 44-byte payload reuses the existing Libre 2 pipeline.
 //
 //  A Libre 2 is "generation 2" when patchInfo[2] gives product type 3 and
-//  security version >= 9 (see `securityGeneration`). Generation 1 sensors use
+//  security version >= 9, or product type 7 and security version >= 4 (see
+//  `securityGeneration`). Generation 1 sensors use
 //  none of this; they are handled by `enum Libre2` in PreLibre2.swift.
 //
 //  NOTE ON KEYS: this is now the REAL Gen2 scheme, ported from Juggluco's
@@ -454,6 +455,14 @@ final class Libre2Gen2Session {
         return key
     }
 
+    /// Forget the previous connection's exchange, so nothing from it is used
+    /// before this connection's session info arrives.
+    func reset() {
+        sessionKey = nil
+        random = nil
+        counter = nil
+    }
+
     /// Resume a session already opened, without redoing the exchange.
     func resume(sessionKey: [UInt8]) throws {
         guard sessionKey.count == Libre2Gen2.keyLength else {
@@ -493,8 +502,10 @@ final class Libre2Gen2Session {
 // MARK: - NFC inputs
 
 extension Libre2Gen2 {
-    /// The generation, read from patchInfo[2]: 2 for product type 3 with
-    /// security version >= 9. A generation 1 sensor uses none of these keys.
+    /// The generation, read from patchInfo[2] as LibreLink does
+    /// (DefaultSensorAbstractionService.getSecurityGeneration): product type 3
+    /// is gen2 from security version 9, product type 7 from security version 4.
+    /// A generation 1 sensor uses none of these keys.
     ///
     /// The reference reads patchInfo[3] because it indexes the raw NFC frame,
     /// whose byte 0 is the ISO 15693 response-flags byte. CoreNFC strips that
@@ -506,13 +517,14 @@ extension Libre2Gen2 {
         }
         let productTypeValue = Int(patchInfo[2] >> 4)
         let securityVersion = Int(patchInfo[2] & 0x0F)
-        if productTypeValue == productType && securityVersion >= securityVersionMin {
-            return 2
+        switch productTypeValue {
+        case productType:
+            return securityVersion < securityVersionMin ? 1 : 2
+        case 7:
+            return securityVersion < 4 ? 1 : 2
+        default:
+            return 0
         }
-        if (productTypeValue == productType || productTypeValue == 7) && securityVersion < securityVersionMin {
-            return 1
-        }
-        return 0
     }
 
     /// The NFC command asking for the key index: 02 A1 <UID[6]> 22. UID[6] is

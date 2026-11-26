@@ -35,14 +35,26 @@ struct Libre2Gen2PairingResult {
 enum Libre2Gen2Pairing {
     static let framBlocks = 43
     static let blocksPerRequest = 3
+    /// Attempts per command, as LibreLink (DefaultNfcRfModuleGen2.tranceiveWithRetries)
+    static let attemptsPerCommand = 5
 
     /// Run the gen2 NFC exchange. `custom` sends ISO 15693 custom command 0xA1
     /// with the given parameters and returns the reply as CoreNFC does.
     static func pair(uid: [UInt8],
                      keyStore: Libre2Gen2KeyStore = Libre2Gen2RootKeyStore(),
                      custom: (Data) async throws -> Data) async throws -> Libre2Gen2PairingResult {
+        // Each command is retried on its own, as LibreLink does, so one
+        // dropped exchange in the 20 needed does not fail the pairing.
         func send(_ parameters: [UInt8]) async throws -> [UInt8] {
-            [UInt8](try await custom(Data(parameters)))
+            var attempt = 1
+            while true {
+                do {
+                    return [UInt8](try await custom(Data(parameters)))
+                } catch {
+                    guard attempt < attemptsPerCommand, !Task.isCancelled else { throw error }
+                    attempt += 1
+                }
+            }
         }
 
         // Root slot: A1 22, the u16 at raw[3..4], CoreNFC [2..3].

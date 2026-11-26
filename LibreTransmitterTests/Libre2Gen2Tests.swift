@@ -190,6 +190,63 @@ final class Libre2Gen2Tests: XCTestCase {
             XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: info), 1, "\(info)")
         }
         XCTAssertThrowsError(try Libre2Gen2.securityGeneration(patchInfo: [0x2C, 0x0A]))
+
+        // LibreLink's rule: product type 3 is gen2 from security version 9,
+        // product type 7 from security version 4; any other type is neither.
+        XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x74, 0x02]), 2)
+        XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x7F, 0x02]), 2)
+        XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x73, 0x02]), 1)
+        XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x39, 0x02]), 2)
+        XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x38, 0x02]), 1)
+        XCTAssertEqual(try Libre2Gen2.securityGeneration(patchInfo: [0x00, 0x00, 0x5A, 0x02]), 0)
+    }
+
+    func testSessionResetForgetsTheKey() throws {
+        let sensor = try FakeGen2Sensor(index: 1, keyStore: keyStore)
+        let session = try Libre2Gen2Session(uid: sensor.uid, keyIndex: 1,
+                                            streamingAuthData: sensor.blob, keyStore: keyStore)
+        let command = try session.sessionInfoCommand(challenge: sensor.challenge())
+        try session.open(sessionInfo: try sensor.reply(command: command))
+        XCTAssertNotNil(session.sessionKey)
+
+        // A new connection must not decrypt with the previous connection's key,
+        // nor open a session from its exchange
+        session.reset()
+        XCTAssertNil(session.sessionKey)
+        XCTAssertThrowsError(try session.decrypt(packet: try sensor.reading(number: 1)))
+        XCTAssertThrowsError(try session.open(sessionInfo: try sensor.reply(command: command)))
+    }
+
+    func testPairingRetriesEachCommandAsLibreLink() async throws {
+        let uid = Self.bytes("1122334455a407e0")
+        struct Dropped: Error {}
+
+        // A command that keeps failing is tried attemptsPerCommand times, then fails the pairing
+        var calls = 0
+        do {
+            _ = try await Libre2Gen2Pairing.pair(uid: uid) { _ in
+                calls += 1
+                throw Dropped()
+            }
+            XCTFail("pairing should fail")
+        } catch is Dropped {
+        }
+        XCTAssertEqual(calls, Libre2Gen2Pairing.attemptsPerCommand)
+
+        // One dropped exchange is retried: the second answer is used
+        var sent = [Data]()
+        do {
+            _ = try await Libre2Gen2Pairing.pair(uid: uid) { parameters in
+                sent.append(parameters)
+                if sent.count == 1 { throw Dropped() }
+                return Data([0x00, 0x00, 0x09, 0x00])   // root slot 9, which is not present
+            }
+            XCTFail("pairing should fail on the unknown root slot")
+        } catch is Dropped {
+            XCTFail("the dropped exchange should have been retried")
+        } catch {
+        }
+        XCTAssertEqual(sent, [Data([Libre2Gen2.cmdReadRootSlot]), Data([Libre2Gen2.cmdReadRootSlot])])
     }
 
     func testParseKeyIndex() throws {

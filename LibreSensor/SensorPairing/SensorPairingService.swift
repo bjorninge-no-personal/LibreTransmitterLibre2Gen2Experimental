@@ -135,6 +135,13 @@ public class SensorPairingService: NSObject, NFCTagReaderSessionDelegate, Sensor
                 case .success:
                     tag.customCommand(requestFlags: .highDataRate, customCommandCode: 0xA1, customRequestParameters: Data()) { response, error in
 
+                        // Without patchInfo the sensor type, and so its generation, is unknown
+                        guard error == nil, response.count == 6 else {
+                            session.invalidate(errorMessage: PairingError.noPatchInfo.localizedDescription)
+                            self.sendError(PairingError.noPatchInfo)
+                            return
+                        }
+
                         // Gen2 sensors do not answer the standard block read used below,
                         // so they take their own path from here (SensorPairingService+Gen2).
                         if (try? Libre2Gen2.securityGeneration(patchInfo: [UInt8](response))) == 2 {

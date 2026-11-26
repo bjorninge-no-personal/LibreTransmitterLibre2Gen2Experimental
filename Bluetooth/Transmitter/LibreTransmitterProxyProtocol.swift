@@ -28,6 +28,7 @@ public protocol LibreTransmitterProxyProtocol: AnyObject {
     func didDiscoverWriteCharacteristics(_ peripheral: CBPeripheral, writeCharacteristics: CBCharacteristic)
     func didDiscoverNotificationCharacteristic(_ peripheral: CBPeripheral, notifyCharacteristic: CBCharacteristic)
     func didWrite(_ peripheral: CBPeripheral, characteristics: CBCharacteristic)
+    func didUpdateNotificationState(_ peripheral: CBPeripheral, characteristic: CBCharacteristic)
 
     func reset()
 
@@ -54,6 +55,10 @@ extension LibreTransmitterProxyProtocol {
     }
 
     func didWrite(_ peripheral: CBPeripheral, characteristics: CBCharacteristic) {
+
+    }
+
+    func didUpdateNotificationState(_ peripheral: CBPeripheral, characteristic: CBCharacteristic) {
 
     }
 

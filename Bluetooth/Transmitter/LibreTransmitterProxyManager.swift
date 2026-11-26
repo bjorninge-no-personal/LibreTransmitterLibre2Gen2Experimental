@@ -692,6 +692,7 @@ public final class LibreTransmitterProxyManager: NSObject, CBCentralManagerDeleg
         } else {
             self.reset()
             requestData()
+            self.activePlugin?.didUpdateNotificationState(peripheral, characteristic: characteristic)
         }
         state = .Notifying
     }
