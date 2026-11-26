@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		CE82EB359D752A0C819DE9B4 /* SensorPairingService+Gen2.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4DB57404712A26857CF4A91 /* SensorPairingService+Gen2.swift */; };
 		DAA338F752B3FD9BB75736C5 /* Libre2Gen2DirectHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA616EC527DA7EC59C555931 /* Libre2Gen2DirectHandler.swift */; };
+		AE22D23E8C08098D558E9274 /* Libre2Gen2Connection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2492CF59D030F0D5E0CD9C15 /* Libre2Gen2Connection.swift */; };
 		CEE42AB80362E4CDAFF6B2A5 /* Libre2Gen2.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30DA987323EAC081D631809 /* Libre2Gen2.swift */; };
 		AB0334A32AD373C328306F3F /* Libre2Gen2Credentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46F1DEDEA3CE0FCE5554F806 /* Libre2Gen2Credentials.swift */; };
 		270C1429266047490063405B /* NotificationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 270C1428266047490063405B /* NotificationSettingsView.swift */; };
@@ -201,6 +202,7 @@
 		E9B7C50D6E0ECE47D8492AEC /* Libre2Gen2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Libre2Gen2Tests.swift; sourceTree = "<group>"; };
 		D4DB57404712A26857CF4A91 /* SensorPairingService+Gen2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SensorPairingService+Gen2.swift"; sourceTree = "<group>"; };
 		DA616EC527DA7EC59C555931 /* Libre2Gen2DirectHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Libre2Gen2DirectHandler.swift; sourceTree = "<group>"; };
+		2492CF59D030F0D5E0CD9C15 /* Libre2Gen2Connection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Libre2Gen2Connection.swift; sourceTree = "<group>"; };
 		F30DA987323EAC081D631809 /* Libre2Gen2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Libre2Gen2.swift; sourceTree = "<group>"; };
 		46F1DEDEA3CE0FCE5554F806 /* Libre2Gen2Credentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Libre2Gen2Credentials.swift; sourceTree = "<group>"; };
 		2709A6F229E5E0D3004355A3 /* FakeSensorPairingData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeSensorPairingData.swift; sourceTree = "<group>"; };
@@ -453,6 +455,7 @@
 				27850BCD256725E80020D109 /* LibreTransmitterProxyManager.swift */,
 				2746C73B26D91FC900E31BD9 /* Libre2DirectTransmitter.swift */,
 				DA616EC527DA7EC59C555931 /* Libre2Gen2DirectHandler.swift */,
+				2492CF59D030F0D5E0CD9C15 /* Libre2Gen2Connection.swift */,
 				27850BCC256725E80020D109 /* BubbleTransmitter.swift */,
 				27850BCA256725E70020D109 /* MiaomiaoTransmitter.swift */,
 			);
@@ -932,6 +935,7 @@
 				C1C318D72A47638E00C6F29F /* MockSensorPairingService.swift in Sources */,
 				2746C73C26D91FC900E31BD9 /* Libre2DirectTransmitter.swift in Sources */,
 				DAA338F752B3FD9BB75736C5 /* Libre2Gen2DirectHandler.swift in Sources */,
+				AE22D23E8C08098D558E9274 /* Libre2Gen2Connection.swift in Sources */,
 				27F93B2C2816B93900EE39A7 /* LibreTransmitterManager+Transmitters.swift in Sources */,
 				C1AF65982A49C902008D0690 /* SelectionState.swift in Sources */,
 				C1C318CD2A47468D00C6F29F /* BluetoothSearch.swift in Sources */,

@@ -12,7 +12,7 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
 
     func reset() {
         rxBuffer.resetAllBytes()
-        gen2Fragments.removeAll()
+        gen2?.reset()
     }
 
     class var manufacturerer: String {
@@ -50,73 +50,27 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     // MARK: Gen2 routing
     //
     // Gen2 sensors share this class (same service/characteristics/name). When
-    // the paired sensor is gen2-ready, messages are driven through a session
-    // handler instead of the stateless gen1 unlock-then-decrypt path.
+    // the paired sensor is gen2, everything BLE goes through Libre2Gen2Connection
+    // instead of the gen1 unlock-then-decrypt path below; only the decoded
+    // payload comes back here (emit).
     //
-    // Routing follows what the sensor is, not whether the handler could be
-    // built: a gen2 sensor without credentials or keys must never fall back to
-    // the gen1 unlock, it simply cannot stream.
+    // Routing follows what the sensor is, not whether it has credentials: a gen2
+    // sensor without them must never fall back to the gen1 unlock.
     //
-    // Both are taken from the paired sensor at the start of each connection
-    // (refreshGen2Sensor), so a sensor paired since this object was created
-    // is never handled with the previous sensor's credentials.
-    private var isGen2 = false
-    private var gen2Handler: Libre2Gen2DirectHandler?
-    private var gen2HandlerCredentials: (uuid: Data, keyIndex: Int?, streamingAuthData: Data?)?
+    // Taken from the paired sensor at the start of each connection, so a sensor
+    // paired since this object was created is never handled with the previous
+    // sensor's credentials.
+    private var gen2: Libre2Gen2Connection?
 
     private func refreshGen2Sensor() {
-        let sensor = UserDefaults.standard.preSelectedSensor
-        isGen2 = sensor?.securityGeneration == 2
-        guard isGen2, let sensor else {
-            gen2Handler = nil
-            gen2HandlerCredentials = nil
+        guard let sensor = UserDefaults.standard.preSelectedSensor, sensor.securityGeneration == 2 else {
+            gen2 = nil
             return
         }
-        if let built = gen2HandlerCredentials, built.uuid == sensor.uuid, built.keyIndex == sensor.keyIndex,
-           built.streamingAuthData == sensor.streamingAuthData {
-            return
-        }
-        gen2Handler = Libre2Gen2DirectHandler(sensor: sensor, keyStore: Libre2Gen2RootKeyStore())
-        gen2HandlerCredentials = (sensor.uuid, sensor.keyIndex, sensor.streamingAuthData)
-        gen2Phase = .awaitingNotify
-        if gen2Handler == nil {
-            logger.debug("gen2 sensor paired but handler unavailable (missing NFC credentials or keys)")
+        if gen2?.isFor(sensor) != true {
+            gen2 = Libre2Gen2Connection(sensor: sensor, delegate: delegate)
         }
     }
-
-    // Where we are in the gen2 BLE exchange, following LibreLink's BLE callback
-    // class: notifications are enabled on F001 only; once that completes, the
-    // kickoff is written; the challenge and session info arrive on F001; only
-    // once the session is open are notifications enabled on F002, which
-    // carries the glucose records. Reassembly (updateValueForGen2) is keyed on
-    // this phase, because notification lengths collide across phases: 18
-    // bytes is both the second part of session info and the middle of a record.
-    private enum Gen2Phase {
-        case awaitingNotify       // F001 notifications being enabled; kickoff not yet written
-        case awaitingChallenge    // F001: a single 14-byte challenge notification
-        case awaitingSessionInfo  // F001: a 7-byte and an 18-byte notification (total 25)
-        case streaming            // F002: 20, 18 and 8-byte notifications per 46-byte record
-
-        /// The notification lengths making up one message, in message order.
-        var fragmentLengths: [Int] {
-            switch self {
-            case .awaitingNotify: return []
-            case .awaitingChallenge: return [Libre2Gen2.challengeLength]
-            case .awaitingSessionInfo: return [7, 18]
-            case .streaming: return [20, 18, 8]
-            }
-        }
-    }
-    private var gen2Phase: Gen2Phase = .awaitingNotify
-
-    // The fragments of the message being reassembled, keyed by length. Like
-    // LibreLink, each fragment is placed by its length rather than by arrival
-    // order, and a repeated length replaces the earlier fragment.
-    private var gen2Fragments = [Int: Data]()
-
-    // F002, saved at discovery; notifications on it are enabled only once the
-    // session is open.
-    private var gen2NotifyCharacteristic: CBCharacteristic?
 
     class func canSupportPeripheral(_ peripheral: PeripheralProtocol) -> Bool {
         // name can be one of the following formats:
@@ -157,8 +111,11 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     }
 
     func updateValueForNotifyCharacteristics(_ value: Data, peripheral: CBPeripheral, writeCharacteristic: CBCharacteristic?) {
-        if isGen2 {
-            updateValueForGen2(value, peripheral: peripheral, writeCharacteristic: writeCharacteristic)
+        if let gen2 {
+            if let payload = gen2.receive(value, peripheral: peripheral, writeCharacteristic: writeCharacteristic),
+               let sensor = UserDefaults.standard.preSelectedSensor {
+                emit(decryptedBLE: payload, sensor: sensor)
+            }
             return
         }
 
@@ -185,28 +142,9 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     func didDiscoverWriteCharacteristics(_ peripheral: CBPeripheral, writeCharacteristics: CBCharacteristic) {
         refreshGen2Sensor()
 
-        if isGen2 {
-            // Gen2 uses a challenge/response handshake, not the gen1 streaming
-            // unlock, and it rides on notifications from the write
-            // characteristic (F001). As LibreLink does, enable those first; the
-            // kickoff is written once that has completed
-            // (didUpdateNotificationState).
-            //
-            // LibreLink counts a connection lost while waiting for session info
-            // as an authentication failure, not a dropout: the sensor did not
-            // accept our command, e.g. a wrong root slot or streamingAuthData
-            if case .awaitingSessionInfo = gen2Phase {
-                logger.error("gen2: authentication failed, the previous connection was lost while waiting for session info")
-                delegate?.libreDeviceLogMessage(payload: "gen2 authentication failed: connection lost while waiting for session info (wrong root slot or streamingAuthData?)", type: .receive)
-            }
-
-            // A new connection always starts a new session: drop the previous
-            // connection's partial message and session key.
-            gen2Phase = .awaitingNotify
-            reset()
-            gen2Handler?.reset()
-            logger.debug("gen2: enabling notify on write characteristic")
-            peripheral.setNotifyValue(true, for: writeCharacteristics)
+        if let gen2 {
+            // Gen2 uses a challenge/response handshake, not the gen1 streaming unlock
+            gen2.didDiscoverWriteCharacteristic(peripheral, writeCharacteristics)
             return
         }
 
@@ -225,10 +163,8 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     func didDiscoverNotificationCharacteristic(_ peripheral: CBPeripheral, notifyCharacteristic: CBCharacteristic) {
         refreshGen2Sensor()
 
-        if isGen2 {
-            // Enabled once the session is open (updateValueForGen2), as LibreLink does
-            logger.debug("gen2: saving notifyCharacteristic")
-            gen2NotifyCharacteristic = notifyCharacteristic
+        if let gen2 {
+            gen2.didDiscoverNotificationCharacteristic(notifyCharacteristic)
             return
         }
 
@@ -239,18 +175,7 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
     }
 
     func didUpdateNotificationState(_ peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard isGen2, case .awaitingNotify = gen2Phase,
-              characteristic.uuid == Self.writeCharacteristic?.value else {
-            return
-        }
-        // Notifications on F001 are on: kick off the exchange by writing the
-        // "read security challenge" opcode (0x20). The sensor answers with its
-        // 14-byte challenge on F001.
-        gen2Phase = .awaitingChallenge
-        let kickoff = Data([Libre2Gen2.cmdReadChallenge])
-        logger.debug("gen2: writing read-security-challenge kickoff: \(kickoff.hexEncodedString())")
-        delegate?.libreDeviceLogMessage(payload: "gen2 kickoff (read security challenge): \(kickoff.hexEncodedString())", type: .send)
-        peripheral.writeValue(kickoff, for: characteristic, type: .withResponse)
+        gen2?.didUpdateNotificationState(peripheral, characteristic: characteristic)
     }
 
     private func unlock() -> Data? {
@@ -299,8 +224,8 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
 
     /// Shared tail for both generations: parse a 44-byte decrypted BLE payload,
     /// verify its CRC, build metadata, merge buffered trends, and notify the
-    /// delegate. Gen1 reaches here after `Libre2.decryptBLE`; gen2 after the
-    /// session handler has already decrypted and CRC-checked the packet.
+    /// delegate. Gen1 reaches here after `Libre2.decryptBLE`; gen2 after
+    /// Libre2Gen2Connection has already decrypted and CRC-checked the packet.
     private func emit(decryptedBLE: Data, sensor: Sensor) {
             var sensorUpdate = Libre2.parseBLEData(decryptedBLE)
 
@@ -365,88 +290,6 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
             delegate?.libreSensorDidUpdate(with: sensorUpdate, and: metadata!)
 
             print("libre2 got sensorupdate: \(String(describing: sensorUpdate))")
-    }
-
-    // MARK: - Gen2 message handling
-
-    /// Reassembles gen2 BLE notifications into whole messages and drives the
-    /// handshake/stream state machine.
-    ///
-    /// Framing as in LibreLink's BLE callback class:
-    ///
-    ///   - Handshake on F001 (login characteristic):
-    ///       * challenge    — ONE 14-byte notification.
-    ///       * session info — a 7-byte and an 18-byte notification, at 0 and 7.
-    ///   - Stream on F002 (raw glucose characteristic), enabled only once the
-    ///     session is open:
-    ///       * each 46-byte record — a 20, an 18 and an 8-byte notification,
-    ///         at 0, 20 and 38.
-    ///
-    /// The source characteristic is not available here (the BLE router
-    /// forwards only the value), so reassembly is keyed on `gen2Phase`. Since
-    /// F002 is only enabled once the handshake is done, the handshake never
-    /// sees record fragments. A fragment of a length the phase does not expect
-    /// is dropped. A missing fragment is covered by the shared inter-
-    /// notification timeout in LibreTransmitterProxyManager, which calls
-    /// reset() to drop the partial message without rewinding the phase.
-    ///
-    /// GEN2-TRANSPORT-NOTE: this is LibreLink's sequence, not yet seen on a
-    /// real gen2 sensor here; the fragments are logged so a capture can
-    /// confirm it.
-    private func updateValueForGen2(_ value: Data, peripheral: CBPeripheral, writeCharacteristic: CBCharacteristic?) {
-        delegate?.libreDeviceLogMessage(payload: "gen2 received value: \(value.toDebugString())", type: .receive)
-
-        let lengths = gen2Phase.fragmentLengths
-        guard lengths.contains(value.count) else {
-            logger.debug("gen2: ignoring \(value.count)-byte notification in phase \(String(describing: self.gen2Phase))")
-            return
-        }
-        gen2Fragments[value.count] = value
-
-        guard lengths.allSatisfy({ gen2Fragments[$0] != nil }) else {
-            // Still waiting for the remaining fragment(s) of this message.
-            logger.debug("gen2: reassembling in phase \(String(describing: self.gen2Phase)): have \(self.gen2Fragments.keys.sorted()) of \(lengths)")
-            return
-        }
-
-        let message = lengths.flatMap { [UInt8](gen2Fragments[$0]!) }
-        gen2Fragments.removeAll()
-
-        guard let handler = gen2Handler else { return }
-        switch handler.ingest(message) {
-        case .write(let bytes):
-            guard let writeCharacteristic else {
-                logger.debug("gen2: no write characteristic to send command")
-                return
-            }
-            // Challenge answered; the sensor now replies with session info on
-            // F001 as a 7-byte then an 18-byte notification.
-            gen2Phase = .awaitingSessionInfo
-            delegate?.libreDeviceLogMessage(payload: "gen2 writing command: \(Data(bytes).hexEncodedString())", type: .send)
-            peripheral.writeValue(Data(bytes), for: writeCharacteristic, type: .withResponse)
-
-        case .payload(let payload):
-            guard let sensor = UserDefaults.standard.preSelectedSensor else { return }
-            emit(decryptedBLE: Data(payload), sensor: sensor)
-
-        case .none:
-            // Session info has opened the session: now enable notifications on
-            // F002, where the glucose records arrive. (`.none` is also the no-op
-            // for a message that did not open it, which must leave the phase alone.)
-            if case .awaitingSessionInfo = gen2Phase, handler.isOpen {
-                gen2Phase = .streaming
-                guard let gen2NotifyCharacteristic else {
-                    logger.error("gen2: session open but no notify characteristic to enable")
-                    return
-                }
-                logger.debug("gen2: session open, enabling notify on notify characteristic")
-                peripheral.setNotifyValue(true, for: gen2NotifyCharacteristic)
-            }
-
-        case .failure:
-            delegate?.libreSensorDidUpdate(with: .checksumValidationError)
-            reset()
-        }
     }
 
 }

@@ -2,31 +2,16 @@
 //  Libre2Gen2DirectHandler.swift
 //  LibreTransmitter
 //
-//  The BLE-side state machine for a Libre 2 "generation 2" sensor, driving the
-//  pure crypto in Libre2Gen2.swift. Gen2 sensors advertise the same service
-//  and characteristics as gen1 (FDE3 / F001 / F002) and the same peripheral
-//  name, so they arrive through `Libre2DirectTransmitter`; that class branches
-//  to this handler when the paired sensor is gen2.
+//  The message-level state machine for a Libre 2 "generation 2" sensor,
+//  driving the pure crypto in Libre2Gen2.swift: it turns a whole challenge
+//  into the session-info command, opens the session on session info, and
+//  decrypts glucose records. The BLE transport around it (notifications,
+//  kickoff, reassembly) is Libre2Gen2Connection.
 //
 //  WHAT IS KNOWN (read off the reference and verified in Libre2Gen2Tests):
 //    - the crypto: challenge -> command -> session-info -> per-packet decrypt.
 //    - message shapes: 14-byte challenge, 19-byte command out, 25-byte session
 //      info, 46-byte readings, 44-byte decrypted payload.
-//
-//  BLE CHOREOGRAPHY (LibreLink's BLE callback class; applied in
-//  Libre2DirectTransmitter, which owns the transport/reassembly):
-//    - enable notifications on F001 only; once that completes, write {0x20}
-//      ("read security challenge") on F001.
-//    - F001 challenge: ONE 14-byte notification.
-//    - F001 session info: TWO notifications, 7 bytes THEN 18 (total 25).
-//    - only once the session is open, enable notifications on F002.
-//    - F002 stream: each 46-byte record as THREE notifications of 20, 18 and
-//      8 bytes, placed by length at 0, 20 and 38 as LibreLink does.
-//  This handler only ever sees a fully reassembled message, so its length
-//  dispatch below is unambiguous.
-//
-//  STILL NEEDS A REAL-SENSOR CAPTURE: the sequence and chunk lengths are
-//  LibreLink's, but have not been seen on a real gen2 sensor here.
 //
 
 import Foundation
@@ -67,7 +52,7 @@ final class Libre2Gen2DirectHandler {
     }
 
     /// Classify a single *fully reassembled* message and advance the state
-    /// machine. The caller (Libre2DirectTransmitter) reassembles the raw
+    /// machine. The caller (Libre2Gen2Connection) reassembles the raw
     /// notifications by exchange phase before calling this, so the message
     /// lengths dispatched on here are the whole-message totals and are
     /// unambiguous: 14 (challenge) / 25 (session info) / >= 46 (reading). The
