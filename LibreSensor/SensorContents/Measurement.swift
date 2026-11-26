@@ -36,6 +36,7 @@ public enum MeasurementError: Int, CaseIterable, Codable {
     case REF_R                   = 0x40
     case SIGNAL_SATURATED        = 128    //   0x80
     case SENSOR_SIGNAL_LOW       = 256    //  0x100
+    case LEAK_DETECTED           = 512    //  0x200, named as in LibreLink's DataQuality
     case THERMISTOR_OUT_OF_RANGE = 2048   //  0x800
 
     case TEMP_HIGH               = 8192   // 0x2000

@@ -175,6 +175,14 @@ class Libre2DirectTransmitter: LibreTransmitterProxyProtocol {
             // kickoff is written once that has completed
             // (didUpdateNotificationState).
             //
+            // LibreLink counts a connection lost while waiting for session info
+            // as an authentication failure, not a dropout: the sensor did not
+            // accept our command, e.g. a wrong root slot or streamingAuthData
+            if case .awaitingSessionInfo = gen2Phase {
+                logger.error("gen2: authentication failed, the previous connection was lost while waiting for session info")
+                delegate?.libreDeviceLogMessage(payload: "gen2 authentication failed: connection lost while waiting for session info (wrong root slot or streamingAuthData?)", type: .receive)
+            }
+
             // A new connection always starts a new session: drop the previous
             // connection's partial message and session key.
             gen2Phase = .awaitingNotify
