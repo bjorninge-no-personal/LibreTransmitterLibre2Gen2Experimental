@@ -115,7 +115,7 @@ extension SensorPairingService {
     func pairGen2(session: NFCTagReaderSession, tag: NFCISO15693Tag, sensorUID: Data, patchInfo: Data) {
         let logger = Logger(forType: Self.self)
 
-        guard sensorUID.count == Libre2Gen2.uidLength, patchInfo.count == 6 else {
+        guard sensorUID.count == Libre2Gen2.uidLength, patchInfo.count == 6 || patchInfo.count == 8 else {
             session.invalidate(errorMessage: PairingError.noSensorData.localizedDescription)
             sendError(PairingError.noSensorData)
             return
